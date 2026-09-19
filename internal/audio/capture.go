@@ -1,12 +1,16 @@
 package audio
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"math"
+	"os"
 	"os/exec"
+	"strings"
 )
 
 // FrameSize is 512 samples = 32ms at 16kHz
@@ -18,12 +22,51 @@ type MicStream struct {
 	stdout io.ReadCloser
 }
 
+// CaptureDevice returns the ALSA PCM name to capture from.
+// Override with MIC_DEVICE=pulse / MIC_DEVICE=plughw:1,0 / etc.
+func CaptureDevice() string {
+	if d := os.Getenv("MIC_DEVICE"); d != "" {
+		return d
+	}
+	return "default"
+}
+
+// logCaptureDevice prints what arecord will open, plus the resolved
+// PipeWire/PulseAudio source if we can find it.
+func logCaptureDevice(device string) {
+	log.Printf("[MIC] arecord device: %s", device)
+
+	if out, err := exec.Command("pactl", "info").Output(); err == nil {
+		sc := bufio.NewScanner(strings.NewReader(string(out)))
+		for sc.Scan() {
+			line := sc.Text()
+			if strings.HasPrefix(line, "Default Source:") {
+				log.Printf("[MIC] pulse default source: %s",
+					strings.TrimSpace(strings.TrimPrefix(line, "Default Source:")))
+				return
+			}
+		}
+	}
+
+	if out, err := exec.Command("arecord", "-l").Output(); err == nil {
+		sc := bufio.NewScanner(strings.NewReader(string(out)))
+		for sc.Scan() {
+			if strings.HasPrefix(sc.Text(), "card ") {
+				log.Printf("[MIC] ALSA %s", sc.Text())
+			}
+		}
+	}
+}
+
 // StartMicCapture spawns an unbuffered ALSA capture pipeline
 func StartMicCapture(ctx context.Context) (*MicStream, error) {
-	// arecord grabs raw PCM 16-bit Little Endian, Mono, 16kHz from default audio input
+	device := CaptureDevice()
+	logCaptureDevice(device)
+
+	// arecord grabs raw PCM 16-bit Little Endian, Mono, 16kHz from the chosen input
 	cmd := exec.CommandContext(ctx, "arecord",
 		"-q",
-		"-D", "default",
+		"-D", device,
 		"-r", "16000",
 		"-c", "1",
 		"-f", "S16_LE",

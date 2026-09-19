@@ -16,7 +16,7 @@ func main() {
 
 	cfg := config.Load()
 	player := audio.NewAudioPlayer()
-	detector := wakeword.NewRealWakeWordDetector(cfg.WakeWord)
+	detector := wakeword.NewDetector(cfg.DetectorType, cfg.WakeWord, cfg.ModelPath)
 	manager := mode.NewManager(detector, player, cfg.UDPAudioPort)
 
 	// Set default mode

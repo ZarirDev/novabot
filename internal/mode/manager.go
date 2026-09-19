@@ -28,10 +28,11 @@ type Manager struct {
 
 func NewManager(detector wakeword.Detector, player *audio.AudioPlayer, udpPort int) *Manager {
 	return &Manager{
-		currentMode: ModeAssistant,
-		detector:    detector,
-		player:      player,
-		udpPort:     udpPort,
+		// currentMode intentionally zero-value ("") so the first SetMode
+		// call actually performs the transition and starts the detector.
+		detector: detector,
+		player:   player,
+		udpPort:  udpPort,
 	}
 }
 
@@ -76,10 +77,14 @@ func (m *Manager) SetMode(newMode AppMode) error {
 		err := m.detector.Start(ctx, func() {
 			log.Println("[NOVABOT] Wake word detected! Playing confirmation ping...")
 			pingAudio := audio.GenerateTone(1000.0, 100, 16000)
-			_ = m.player.PlayWAV(pingAudio)
+			if err := m.player.PlayWAV(pingAudio); err != nil {
+				log.Printf("[AUDIO] ping playback failed: %v", err)
+			}
 
 			ttsAudio := audio.GenerateTTSAudio(16000)
-			_ = m.player.PlayWAV(ttsAudio)
+			if err := m.player.PlayWAV(ttsAudio); err != nil {
+				log.Printf("[AUDIO] tts playback failed: %v", err)
+			}
 		})
 		if err != nil {
 			return fmt.Errorf("failed to restart wake word detector: %w", err)

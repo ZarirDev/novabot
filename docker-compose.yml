@@ -5,10 +5,14 @@ services:
     build: .
     container_name: novabot
     restart: unless-stopped
-    network_mode: host # Ensures lowest possible UDP latency over LAN
+    network_mode: host
     devices:
-      - "/dev/snd:/dev/snd" # Pass-through hardware mic and speakers
+      - "/dev/snd:/dev/snd"
     environment:
       - HTTP_PORT=8080
       - UDP_AUDIO_PORT=4000
       - WAKE_WORD=nova
+      - DETECTOR_TYPE=vosk          # set to "heuristic" to force fallback
+      - MODEL_PATH=/opt/vosk-models/default
+    # optional: cap memory so Jellyfin/Immich always win the OOM fight
+    mem_limit: 512m

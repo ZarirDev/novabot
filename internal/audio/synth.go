@@ -6,12 +6,10 @@ import (
 	"math"
 )
 
-// GenerateTone generates a smooth sine ping in memory
-func GenerateTone(freq float64, durationMs int, sampleRate int) []byte {
+// pcmTone generates raw 16-bit mono PCM (no header).
+func pcmTone(freq float64, durationMs int, sampleRate int) []byte {
 	numSamples := (sampleRate * durationMs) / 1000
 	buf := new(bytes.Buffer)
-
-	writeWAVHeader(buf, numSamples, sampleRate, 1, 16)
 
 	for i := 0; i < numSamples; i++ {
 		t := float64(i) / float64(sampleRate)
@@ -20,15 +18,30 @@ func GenerateTone(freq float64, durationMs int, sampleRate int) []byte {
 		val := int16(sample * 32767.0)
 		_ = binary.Write(buf, binary.LittleEndian, val)
 	}
-
 	return buf.Bytes()
 }
 
-// GenerateTTSAudio generates two-tone confirmation response ("Testing, hi.")
+// wrapWAV prepends a WAV header to raw PCM.
+func wrapWAV(pcm []byte, sampleRate, numChannels, bitsPerSample int) []byte {
+	buf := new(bytes.Buffer)
+	numSamples := len(pcm) / (numChannels * bitsPerSample / 8)
+	writeWAVHeader(buf, numSamples, sampleRate, numChannels, bitsPerSample)
+	buf.Write(pcm)
+	return buf.Bytes()
+}
+
+// GenerateTone returns a single-tone WAV (header + PCM).
+func GenerateTone(freq float64, durationMs int, sampleRate int) []byte {
+	return wrapWAV(pcmTone(freq, durationMs, sampleRate), sampleRate, 1, 16)
+}
+
+// GenerateTTSAudio returns a two-tone confirmation WAV in a single container.
 func GenerateTTSAudio(sampleRate int) []byte {
-	b1 := GenerateTone(880.0, 120, sampleRate)
-	b2 := GenerateTone(1320.0, 200, sampleRate)
-	return append(b1, b2...)
+	pcm := append(
+		pcmTone(880.0, 120, sampleRate),
+		pcmTone(1320.0, 200, sampleRate)...,
+	)
+	return wrapWAV(pcm, sampleRate, 1, 16)
 }
 
 func writeWAVHeader(buf *bytes.Buffer, numSamples, sampleRate, numChannels, bitsPerSample int) {
