@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  novabot:
+    build: .
+    container_name: novabot
+    restart: unless-stopped
+    network_mode: host # Ensures lowest possible UDP latency over LAN
+    devices:
+      - "/dev/snd:/dev/snd" # Pass-through hardware mic and speakers
+    environment:
+      - HTTP_PORT=8080
+      - UDP_AUDIO_PORT=4000
+      - WAKE_WORD=nova
