@@ -28,8 +28,8 @@ type Manager struct {
 
 func NewManager(detector wakeword.Detector, player *audio.AudioPlayer, udpPort int) *Manager {
 	return &Manager{
-		// currentMode intentionally zero-value ("") so the first SetMode
-		// call actually performs the transition and starts the detector.
+		// currentMode intentionally left as zero-value ("") so the first
+		// SetMode call actually transitions and starts the detector.
 		detector: detector,
 		player:   player,
 		udpPort:  udpPort,
@@ -54,7 +54,6 @@ func (m *Manager) SetMode(newMode AppMode) error {
 
 	switch newMode {
 	case ModePCAudio:
-		// Shut down wake-word & mic capture completely to free CPU and RAM
 		log.Println("[MODE] Completely disabling wake-word detector and closing microphone device...")
 		m.detector.Stop()
 
@@ -63,11 +62,9 @@ func (m *Manager) SetMode(newMode AppMode) error {
 		}
 		m.udpStopChan = make(chan struct{})
 
-		// Start direct low-latency audio pipe
 		go m.player.StartUDPStreamListener(m.udpPort, m.udpStopChan)
 
 	case ModeAssistant:
-		// Stop PC audio streaming and reactivate assistant mic listener
 		if m.udpStopChan != nil {
 			close(m.udpStopChan)
 			m.udpStopChan = nil

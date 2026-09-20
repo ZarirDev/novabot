@@ -9,16 +9,18 @@ import (
 	"sync"
 )
 
-type AudioPlayer struct {
-	mu           sync.Mutex
-	udpListening bool
-}
-
+// SpeakerDevice returns the aplay device to output to.
+// Override with SPEAKER_DEVICE=plughw:1,0 / hdmi:CARD=... / etc.
 func SpeakerDevice() string {
 	if d := os.Getenv("SPEAKER_DEVICE"); d != "" {
 		return d
 	}
 	return "pulse"
+}
+
+type AudioPlayer struct {
+	mu           sync.Mutex
+	udpListening bool
 }
 
 func NewAudioPlayer() *AudioPlayer {
@@ -37,8 +39,6 @@ func (ap *AudioPlayer) PlayWAV(wavData []byte) error {
 		return fmt.Errorf("aplay stdin error: %w", err)
 	}
 
-	// capture stderr so we actually see ALSA errors instead of silence
-	var stderrBuf []byte
 	stderrPipe, _ := cmd.StderrPipe()
 
 	if err := cmd.Start(); err != nil {
@@ -50,6 +50,7 @@ func (ap *AudioPlayer) PlayWAV(wavData []byte) error {
 	}
 	_ = stdin.Close()
 
+	var stderrBuf []byte
 	if stderrPipe != nil {
 		buf := make([]byte, 4096)
 		n, _ := stderrPipe.Read(buf)
@@ -82,7 +83,8 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 
 	log.Printf("[AUDIO] Low-latency UDP streaming active on port %d...", port)
 
-	cmd := exec.Command("aplay", "-q", "-D", SpeakerDevice(), "-t", "raw", "-f", "S16_LE", "-r", "48000", "-c", "2")
+	cmd := exec.Command("aplay", "-q", "-D", SpeakerDevice(),
+		"-t", "raw", "-f", "S16_LE", "-r", "48000", "-c", "2")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		log.Printf("[AUDIO] Player pipe error: %v", err)

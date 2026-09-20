@@ -1,43 +1,56 @@
 SHELL := /bin/bash
 ROOT  := $(shell pwd)
 
-export CGO_ENABLED  = 1
-export CGO_LDFLAGS  = -L$(ROOT)/.dev/lib
+# ---- cgo / Vosk ----
+export CGO_ENABLED     = 1
+export CGO_LDFLAGS     = -L$(ROOT)/.dev/lib
 export LD_LIBRARY_PATH = $(ROOT)/.dev/lib
-export MODEL_PATH   = $(ROOT)/.dev/models/default
-export MIC_DEVICE ?= pulse
-export SPEAKER_DEVICE ?= pulse
+export MODEL_PATH      = $(ROOT)/.dev/models/default
 
-.PHONY: run build test vet docker clean nuke
+# ---- audio devices ----
+export MIC_DEVICE      ?= pulse
+export SPEAKER_DEVICE  ?= pulse
 
-## primary dev loop
-run: .dev/lib/libvosk.so .dev/models/default
+# ---- wake word backend ----
+export DETECTOR_TYPE      ?= openwakeword
+export ONNX_RUNTIME_PATH  ?= $(ROOT)/.dev/runtime/libonnxruntime.so
+export OWW_MODEL_DIR      ?= $(ROOT)/.dev/models/oww
+export WAKE_MODEL_FILE    ?= hey_nova.onnx
+
+# ---- runtime tuning (optional overrides) ----
+# export WAKE_CONFIDENCE       ?= 0.75
+# export WAKE_COOLDOWN_SECONDS ?= 1.5
+# export WAKE_VAD_THRESHOLD    ?= 500
+
+.PHONY: run build test vet docker clean nuke setup
+
+## primary dev loop — always runs setup first (it's idempotent)
+run: setup
 	@bash scripts/run-dev.sh
 
-build: .dev/lib/libvosk.so .dev/models/default
+build: setup
 	@go build -o .dev/novabot ./cmd/novabot
 	@echo "✓ .dev/novabot"
 
-test: .dev/lib/libvosk.so .dev/models/default
+test: setup
 	@go test ./...
 
-vet: .dev/lib/libvosk.so
+vet: setup
 	@go vet ./...
 
-## parity build (real container)
 docker:
 	@docker compose build
 	@docker compose up -d
 	@docker compose logs -f novabot
 
-## hygiene
+## setup is cheap when everything already exists (just a few `test -f` calls)
+setup:
+	@bash scripts/setup-dev.sh
+
 clean:
 	@go clean -cache -testcache
 	@rm -f .dev/novabot
 
+## nuke wipes .dev/ except for user-supplied wake models placed by setup-dev.sh
 nuke: clean
 	@rm -rf .dev
-
-## setup targets (idempotent)
-.dev/lib/libvosk.so .dev/models/default:
-	@bash scripts/setup-dev.sh

@@ -16,16 +16,20 @@ extern const char*     vosk_recognizer_result(VoskRecognizer *r);
 extern const char*     vosk_recognizer_partial_result(VoskRecognizer *r);
 extern void            vosk_recognizer_reset(VoskRecognizer *r);
 extern void            vosk_recognizer_free(VoskRecognizer *r);
+extern void            vosk_recognizer_set_words(VoskRecognizer *r, int words);
+extern void            vosk_recognizer_set_partial_words(VoskRecognizer *r, int partial_words);
 */
 import "C"
 
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,16 +38,34 @@ import (
 	"github.com/ZarirDev/novabot/internal/audio"
 )
 
-// 500 RMS ≈ gentle speech floor; keeps inference off during silence/fans.
-const voskVADThreshold = 500.0
+const (
+	defaultVADThreshold    = 500.0
+	defaultConfidence      = 0.75
+	defaultCooldownSeconds = 1.5
+	silenceFramesToReset   = 32 // ~1s at 32ms/frame
+)
 
-// 32 frames * 32 ms ≈ 1 s — clears recognizer state during long silences.
-const voskSilenceFramesToReset = 32
+type voskWord struct {
+	Word string  `json:"word"`
+	Conf float64 `json:"conf"`
+}
+
+type voskResult struct {
+	Text          string     `json:"text"`
+	Partial       string     `json:"partial"`
+	Result        []voskWord `json:"result"`
+	PartialResult []voskWord `json:"partial_result"`
+}
 
 type VoskDetector struct {
 	wakeWord string
 	model    *C.VoskModel
 	rec      *C.VoskRecognizer
+
+	confidence float64
+	cooldown   time.Duration
+	vad        float64
+	debug      bool
 
 	mu         sync.Mutex
 	cancelFunc context.CancelFunc
@@ -59,8 +81,8 @@ func NewVoskDetector(wakeWord, modelPath string) (*VoskDetector, error) {
 		return nil, fmt.Errorf("vosk: failed to load model at %q", modelPath)
 	}
 
-	// Build the grammar BEFORE creating the recognizer.
-	grammar := fmt.Sprintf(`["%s", "hey %s", "[unk]"]`, wakeWord, wakeWord)
+	// Tight grammar — "hey nova" removed to stop "hey"/"hi" false triggers.
+	grammar := fmt.Sprintf(`["%s", "[unk]"]`, wakeWord)
 	cGrammar := C.CString(grammar)
 	defer C.free(unsafe.Pointer(cGrammar))
 
@@ -70,12 +92,26 @@ func NewVoskDetector(wakeWord, modelPath string) (*VoskDetector, error) {
 		return nil, fmt.Errorf("vosk: failed to create recognizer with grammar")
 	}
 
-	log.Printf("[WAKEWORD] Vosk model loaded (%s), grammar locked to '%s'", modelPath, wakeWord)
+	// Word-level confidence in both final and partial results.
+	C.vosk_recognizer_set_words(rec, 1)
+	C.vosk_recognizer_set_partial_words(rec, 1)
+
+	conf := envFloat("WAKE_CONFIDENCE", defaultConfidence)
+	cool := time.Duration(envFloat("WAKE_COOLDOWN_SECONDS", defaultCooldownSeconds) * float64(time.Second))
+	vad := envFloat("WAKE_VAD_THRESHOLD", defaultVADThreshold)
+	debug := os.Getenv("WAKE_DEBUG") == "1"
+
+	log.Printf("[WAKEWORD] Vosk loaded (%s) | grammar=%s | conf≥%.2f | cooldown=%.1fs | vad=%.0f",
+		modelPath, grammar, conf, cool.Seconds(), vad)
 
 	return &VoskDetector{
-		wakeWord: wakeWord,
-		model:    model,
-		rec:      rec,
+		wakeWord:   wakeWord,
+		model:      model,
+		rec:        rec,
+		confidence: conf,
+		cooldown:   cool,
+		vad:        vad,
+		debug:      debug,
 	}, nil
 }
 
@@ -125,17 +161,16 @@ func (d *VoskDetector) loop(ctx context.Context, onDetected func()) {
 			rms := audio.CalculateRMS(samples)
 
 			if meterOn {
-				renderMeter(dbfs(rms), rms >= voskVADThreshold)
+				renderMeter(dbfs(rms), rms >= d.vad)
 			}
 
 			if time.Now().Before(cooldownUntil) {
 				continue
 			}
 
-			// Cheap VAD gate: never touch the model during silence.
-			if rms < voskVADThreshold {
+			if rms < d.vad {
 				silentFrames++
-				if silentFrames == voskSilenceFramesToReset {
+				if silentFrames == silenceFramesToReset {
 					C.vosk_recognizer_reset(d.rec)
 				}
 				continue
@@ -159,19 +194,83 @@ func (d *VoskDetector) loop(ctx context.Context, onDetected func()) {
 				jsonOut = C.GoString(C.vosk_recognizer_partial_result(d.rec))
 			}
 
-			if !strings.Contains(jsonOut, d.wakeWord) {
+			var res voskResult
+			if err := json.Unmarshal([]byte(jsonOut), &res); err != nil {
+				if d.debug {
+					log.Printf("[WAKEWORD-DBG] json parse error: %v | raw=%s", err, jsonOut)
+				}
+				continue
+			}
+
+			var text string
+			var words []voskWord
+			if accepted == 1 {
+				text = res.Text
+				words = res.Result
+			} else {
+				text = res.Partial
+				words = res.PartialResult
+			}
+
+			if d.debug {
+				log.Printf("[WAKEWORD-DBG] accepted=%d text=%q words=%+v", accepted, text, words)
+			}
+
+			if !d.matches(text, words) {
 				continue
 			}
 
 			if meterOn {
-				fmt.Fprintln(os.Stdout) // break the meter line before logging
+				fmt.Fprintln(os.Stdout)
 			}
-			log.Printf("[WAKEWORD] match: %s", jsonOut)
-			cooldownUntil = time.Now().Add(3 * time.Second)
+
+			conf := d.bestConfidence(words)
+			log.Printf("[WAKEWORD] match: %q (conf=%.3f, final=%v)", text, conf, accepted == 1)
+
+			cooldownUntil = time.Now().Add(d.cooldown)
 			C.vosk_recognizer_reset(d.rec)
 			go onDetected()
 		}
 	}
+}
+
+// matches returns true only if the transcript contains the wake word as a
+// standalone token AND the corresponding word's confidence clears the bar.
+func (d *VoskDetector) matches(text string, words []voskWord) bool {
+	if text == "" {
+		return false
+	}
+
+	tokens := strings.Fields(strings.ToLower(text))
+	found := false
+	for _, t := range tokens {
+		if t == d.wakeWord {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false
+	}
+
+	// If confidence data is present, require the wake word's conf to clear
+	// the threshold. Vosk sometimes drops conf fields — in that case we
+	// accept the text match alone.
+	for _, w := range words {
+		if strings.EqualFold(w.Word, d.wakeWord) {
+			return w.Conf >= d.confidence
+		}
+	}
+	return true
+}
+
+func (d *VoskDetector) bestConfidence(words []voskWord) float64 {
+	for _, w := range words {
+		if strings.EqualFold(w.Word, d.wakeWord) {
+			return w.Conf
+		}
+	}
+	return 0
 }
 
 func (d *VoskDetector) Stop() {
@@ -184,8 +283,6 @@ func (d *VoskDetector) Stop() {
 	d.active = false
 }
 
-// Free releases the native model. Optional — useful if you ever want to unload
-// the model on mode switch to reclaim ~200 MB.
 func (d *VoskDetector) Free() {
 	d.Stop()
 	d.mu.Lock()
@@ -200,7 +297,15 @@ func (d *VoskDetector) Free() {
 	}
 }
 
-// dbfs converts int16 RMS to dBFS: 0 dB = full scale, -100 dB = silence floor.
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
+}
+
 func dbfs(rms float64) float64 {
 	if rms < 1 {
 		return -100
@@ -212,7 +317,6 @@ func dbfs(rms float64) float64 {
 	return db
 }
 
-// renderMeter overwrites a single terminal line. 40 chars ≈ -80..0 dBFS.
 func renderMeter(db float64, speaking bool) {
 	level := int((db + 80) / 80 * 40)
 	if level < 0 {
@@ -226,7 +330,6 @@ func renderMeter(db float64, speaking bool) {
 	if speaking {
 		marker = "●"
 	}
-	// trailing spaces scrub any residue from prior log lines
 	fmt.Fprintf(os.Stdout, "\r[MIC] %6.1f dBFS |%s| %s            ",
 		db, bar, marker)
 }
