@@ -146,7 +146,13 @@ func (d *OpenWakeWordDetector) loop(ctx context.Context, onDetected func()) {
 				renderMeter(dbfs(rms), rms >= d.silenceRMS)
 			}
 
-			// Silence gate — the reason idle CPU drops from ~40% to ~2%.
+			// ── Silence gate ──────────────────────────────────────
+			// While sustained silence: skip Detect() entirely. The
+			// engine's internal state freezes, which saves ~40% of one
+			// core. When audio resumes we reset the engine so the
+			// classifier doesn't see stale mel features mixed with
+			// fresh audio — that discontinuity is what causes false
+			// fires on the first syllable of any speech.
 			if rms < d.silenceRMS {
 				silentRun++
 				if silentRun >= d.silenceFrames {
@@ -160,6 +166,11 @@ func (d *OpenWakeWordDetector) loop(ctx context.Context, onDetected func()) {
 				if gated {
 					log.Printf("[WAKEWORD] silence gate released (rms=%.0f)", rms)
 					gated = false
+					// Flush stale pipeline state before feeding real
+					// audio. The engine's history guard (len < 5) then
+					// gives us ~400 ms of natural warm-up where no fire
+					// can happen while the mel/embedding buffer refills.
+					d.engine.Reset()
 				}
 				silentRun = 0
 			}

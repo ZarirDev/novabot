@@ -5,16 +5,8 @@ import (
 	"log"
 	"sync"
 
+	"github.com/ZarirDev/novabot/internal/audio"
 	"github.com/gen2brain/malgo"
-)
-
-const (
-	// Match the server's expectation: 48 kHz, stereo, S16_LE.
-	SampleRate = 48000
-	Channels   = 2
-	Format     = malgo.FormatS16
-	// 20 ms of audio per callback — low latency, reasonable packet size.
-	FramesPerPeriod = 960
 )
 
 // Capture wraps a malgo device and delivers raw PCM to a callback.
@@ -22,13 +14,15 @@ type Capture struct {
 	ctx    *malgo.AllocatedContext
 	device *malgo.Device
 	info   DeviceInfo
+	qual   audio.Quality
 
 	mu      sync.Mutex
 	onData  func([]byte)
 	running bool
 }
 
-// NewCapture opens the system audio capture device.
+// NewCapture opens the system audio capture device using the preset from
+// AUDIO_QUALITY (default: standard).
 func NewCapture() (*Capture, error) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, nil)
 	if err != nil {
@@ -42,28 +36,42 @@ func NewCapture() (*Capture, error) {
 		return nil, err
 	}
 
+	q := audio.ActiveQuality()
+
+	// Map our format string to malgo's Format enum.
+	var mf malgo.FormatType
+	switch q.Format {
+	case "S16_LE":
+		mf = malgo.FormatS16
+	case "S24_LE":
+		mf = malgo.FormatS24
+	case "S32_LE":
+		mf = malgo.FormatS32
+	default:
+		mf = malgo.FormatS16
+	}
+
 	devCfg := malgo.DefaultDeviceConfig(malgo.Capture)
-	devCfg.Capture.Format = Format
-	devCfg.Capture.Channels = Channels
-	devCfg.SampleRate = SampleRate
-	devCfg.PeriodSizeInFrames = FramesPerPeriod
-	devCfg.Alsa.NoMMap = 1 // avoid mmap issues on some ALSA setups
+	devCfg.Capture.Format = mf
+	devCfg.Capture.Channels = uint32(q.Channels)
+	devCfg.SampleRate = uint32(q.SampleRate)
+	devCfg.PeriodSizeInFrames = uint32(q.FramesPerPeriod())
+	devCfg.Alsa.NoMMap = 1
 
 	if info.IsLoop {
-		// Windows: switch to loopback mode.
 		devCfg = malgo.DefaultDeviceConfig(malgo.Loopback)
-		devCfg.Capture.Format = Format
-		devCfg.Capture.Channels = Channels
-		devCfg.SampleRate = SampleRate
-		devCfg.PeriodSizeInFrames = FramesPerPeriod
+		devCfg.Capture.Format = mf
+		devCfg.Capture.Channels = uint32(q.Channels)
+		devCfg.SampleRate = uint32(q.SampleRate)
+		devCfg.PeriodSizeInFrames = uint32(q.FramesPerPeriod())
 	} else {
-		// Linux: point at the monitor source explicitly.
 		devCfg.Capture.DeviceID = info.DeviceID.Pointer()
 	}
 
 	c := &Capture{
 		ctx:  ctx,
 		info: info,
+		qual: q,
 	}
 
 	callbacks := malgo.DeviceCallbacks{
@@ -79,10 +87,12 @@ func NewCapture() (*Capture, error) {
 
 	c.device = dev
 	log.Printf("[CLIENT] capture device: %s", info.Name)
+	log.Printf("[CLIENT] format: %s | %d Hz | %d ch | %s | %d kbps | %d frames/period (~%dms)",
+		q.Name, q.SampleRate, q.Channels, q.Format, q.Bandwidth(),
+		q.FramesPerPeriod(), q.FramesPerPeriod()*1000/q.SampleRate)
 	return c, nil
 }
 
-// Start begins capturing. The onData callback receives raw S16_LE interleaved PCM.
 func (c *Capture) Start(onData func([]byte)) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -101,7 +111,6 @@ func (c *Capture) Start(onData func([]byte)) error {
 	return nil
 }
 
-// Stop halts capture and releases resources.
 func (c *Capture) Stop() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -116,14 +125,11 @@ func (c *Capture) Stop() {
 	c.ctx.Free()
 }
 
-// onRecvFrames is called by miniaudio on the realtime audio thread.
-// Keep it minimal: copy the bytes and hand them off.
 func (c *Capture) onRecvFrames(out, in []byte, frameCount uint32) {
 	if len(in) == 0 {
 		return
 	}
 
-	// in is already S16_LE interleaved stereo at our requested rate.
 	buf := make([]byte, len(in))
 	copy(buf, in)
 

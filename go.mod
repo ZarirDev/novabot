@@ -19,3 +19,5 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 )
+
+replace github.com/stanislaw-glogowski/openwakeword_go => ./third_party/openwakeword_go

@@ -4,6 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 	"io/fs"
+	"log"
 	"net/http"
 
 	"github.com/ZarirDev/novabot/internal/mode"
@@ -13,10 +14,9 @@ import (
 var staticFS embed.FS
 
 type Server struct {
-	mgr      *mode.Manager
-	stats    *StatsCollector
-	music    *MusicServer
-	settings *Settings
+	mgr   *mode.Manager
+	stats *StatsCollector
+	music *MusicServer
 }
 
 type ModeRequest struct {
@@ -33,10 +33,9 @@ func NewServer(mgr *mode.Manager) *Server {
 	stats.Start()
 
 	return &Server{
-		mgr:      mgr,
-		stats:    stats,
-		music:    NewMusicServer(),
-		settings: NewSettings(),
+		mgr:   mgr,
+		stats: stats,
+		music: NewMusicServer(),
 	}
 }
 
@@ -44,6 +43,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/mode", s.handleMode)
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
 	mux.HandleFunc("/api/v1/stats", s.handleStats)
+	mux.HandleFunc("/api/v1/audio/status", s.handleAudioStatus)
 	mux.HandleFunc("/api/v1/settings", s.handleSettings)
 
 	s.music.RegisterRoutes(mux)
@@ -61,12 +61,54 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(s.stats.Snapshot())
 }
 
+func (s *Server) handleAudioStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(s.mgr.Player().UDPStatus())
+}
+
+// handleSettings is a thin proxy over the mode system. The "setting"
+// pc_audio_enabled is derived from the current mode — there is no separate
+// state. Toggling it on switches to PC_AUDIO mode, toggling it off
+// switches to ASSISTANT. This matches user expectation: the toggle does
+// exactly what it says.
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+
 	switch r.Method {
 	case http.MethodGet:
-		s.settings.HandleGet(w, r)
+		_ = json.NewEncoder(w).Encode(map[string]bool{
+			"pc_audio_enabled": s.mgr.GetMode() == mode.ModePCAudio,
+		})
+
 	case http.MethodPost:
-		s.settings.HandlePost(w, r)
+		var req struct {
+			PCAudioEnabled *bool `json:"pc_audio_enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+		if req.PCAudioEnabled != nil {
+			target := mode.ModeAssistant
+			if *req.PCAudioEnabled {
+				target = mode.ModePCAudio
+			}
+			if s.mgr.GetMode() != target {
+				log.Printf("[SETTINGS] toggle → switching to %s", target)
+				if err := s.mgr.SetMode(target); err != nil {
+					http.Error(w, `{"error":"failed to switch mode"}`, http.StatusInternalServerError)
+					return
+				}
+			}
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]bool{
+			"pc_audio_enabled": s.mgr.GetMode() == mode.ModePCAudio,
+		})
+
 	default:
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 	}
@@ -93,11 +135,6 @@ func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 		targetMode := mode.AppMode(req.Mode)
 		if targetMode != mode.ModeAssistant && targetMode != mode.ModePCAudio {
 			http.Error(w, `{"error":"invalid mode"}`, http.StatusBadRequest)
-			return
-		}
-
-		if targetMode == mode.ModePCAudio && !s.settings.Get().PCAudioEnabled {
-			http.Error(w, `{"error":"PC audio mode is disabled in settings"}`, http.StatusForbidden)
 			return
 		}
 

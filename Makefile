@@ -17,6 +17,7 @@ export WAKE_MODEL_FILE    = hey_nova.onnx
 # ── audio devices ──────────────────────────────────────
 export MIC_DEVICE      ?= pulse
 export SPEAKER_DEVICE  ?= pulse
+export AUDIO_QUALITY   ?= standard
 
 # ── wake-word tuning ───────────────────────────────────
 export DETECTOR_TYPE         ?= openwakeword

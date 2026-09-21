@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -9,18 +10,21 @@ import (
 )
 
 // Streamer sends captured PCM to the server over UDP.
-// Lightweight: no retransmit, no ordering — the server just plays
-// packets as they arrive. Packet loss is heard as a click, which
-// is acceptable for LAN streaming.
+//
+// Packet format: [8-byte LE nanosecond send timestamp][raw S16_LE PCM].
+// The timestamp lets the server compute one-way latency. Assumes both
+// machines have reasonably synced clocks (NTP on a LAN gets you <5ms).
 type Streamer struct {
-	conn    *net.UDPConn
-	addr    *net.UDPAddr
-	packets atomic.Uint64
-	bytes   atomic.Uint64
-	lastLog time.Time
+	conn     *net.UDPConn
+	addr     *net.UDPAddr
+	packets  atomic.Uint64
+	bytes    atomic.Uint64
+	sendErrs atomic.Uint64
+
+	firstSent bool
+	lastLog   time.Time
 }
 
-// NewStreamer dials the server's UDP port.
 func NewStreamer(server string, port int) (*Streamer, error) {
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", server, port))
 	if err != nil {
@@ -32,10 +36,9 @@ func NewStreamer(server string, port int) (*Streamer, error) {
 		return nil, fmt.Errorf("dial udp: %w", err)
 	}
 
-	// 1 MB send buffer — enough for ~2.5 seconds of 48 kHz stereo S16
-	// in flight, which is far more than any LAN needs.
 	_ = conn.SetWriteBuffer(1 << 20)
 
+	log.Printf("[CLIENT] UDP streamer initialized → %s", addr)
 	return &Streamer{
 		conn:    conn,
 		addr:    addr,
@@ -43,38 +46,54 @@ func NewStreamer(server string, port int) (*Streamer, error) {
 	}, nil
 }
 
-// Send writes one PCM buffer as a UDP datagram.
-// Called from the audio callback thread — keep it fast.
+// Send writes one PCM buffer with a timestamp header.
+// Called from the audio callback thread — keep it allocation-light.
 func (s *Streamer) Send(pcm []byte) {
 	if len(pcm) == 0 {
 		return
 	}
 
-	// 960 frames * 2 ch * 2 bytes = 3840 bytes for a 20 ms period.
-	// That fits comfortably in a single UDP datagram (MTU ~1500 on
-	// most LANs, but jumbo frames or even standard 1500 with UDP
-	// fragmentation handles this fine — miniaudio buffers on the
-	// receive side).
-	_, err := s.conn.Write(pcm)
-	if err != nil {
-		// Don't log on every packet — would spam. Count and report periodically.
+	packet := make([]byte, 8+len(pcm))
+	binary.LittleEndian.PutUint64(packet[:8], uint64(time.Now().UnixNano()))
+	copy(packet[8:], pcm)
+
+	if _, err := s.conn.Write(packet); err != nil {
+		s.sendErrs.Add(1)
 		return
 	}
 
 	s.packets.Add(1)
-	s.bytes.Add(uint64(len(pcm)))
+	s.bytes.Add(uint64(len(packet)))
+
+	if !s.firstSent {
+		s.firstSent = true
+		log.Printf("[CLIENT] first packet sent (%d bytes: 8 hdr + %d pcm)",
+			len(packet), len(pcm))
+	}
 
 	now := time.Now()
-	if now.Sub(s.lastLog) >= 5*time.Second {
-		s.lastLog = now
-		kbps := float64(s.bytes.Load()) * 8 / 1000 / 5
-		s.bytes.Store(0)
-		log.Printf("[CLIENT] streaming %.0f kbps (%d packets)",
-			kbps, s.packets.Load())
+	elapsed := now.Sub(s.lastLog)
+	if elapsed < 5*time.Second {
+		return
 	}
+
+	// 5-second stats window.
+	pkts := s.packets.Load()
+	b := s.bytes.Load()
+	errs := s.sendErrs.Load()
+	kbps := float64(b) * 8 / 1000 / elapsed.Seconds()
+
+	s.bytes.Store(0)
+	s.sendErrs.Store(0)
+	s.lastLog = now
+
+	msg := fmt.Sprintf("[CLIENT] tx %.0f kbps, %d packets total", kbps, pkts)
+	if errs > 0 {
+		msg += fmt.Sprintf(", %d send errors", errs)
+	}
+	log.Println(msg)
 }
 
-// Close shuts down the UDP socket.
 func (s *Streamer) Close() {
 	if s.conn != nil {
 		_ = s.conn.Close()

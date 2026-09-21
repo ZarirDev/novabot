@@ -24,4 +24,5 @@ services:
       - OMP_NUM_THREADS=1
       - WAKE_SILENCE_RMS=400
       - WAKE_SILENCE_FRAMES=25
+      - AUDIO_QUALITY=standard
     mem_limit: 512m

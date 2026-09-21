@@ -1,5 +1,5 @@
 # ── build stage ────────────────────────────────────────
-FROM golang:1.22-bookworm AS builder
+FROM golang:1.27-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libc6-dev curl unzip ca-certificates \

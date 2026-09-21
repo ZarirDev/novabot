@@ -39,7 +39,27 @@ func newONNXSession(path string) (*onnxSession, error) {
 		outputNames[i] = outputs[i].Name
 	}
 
-	session, err := ort.NewDynamicAdvancedSession(path, inputNames, outputNames, nil)
+	// ── Local patch: single-threaded, non-spinning session options ──
+	// ONNX Runtime by default spawns one worker thread per logical core
+	// and each worker busy-spins while waiting for work. On a 12-thread
+	// CPU that alone accounts for most of the wake-word engine's idle
+	// CPU burn.
+	//
+	// NewDynamicAdvancedSession COPIES the options internally, so we
+	// must still call Destroy() on them — the defer below handles that.
+	opts, err := ort.NewSessionOptions()
+	if err != nil {
+		return nil, fmt.Errorf("create session options for %q: %w", path, err)
+	}
+	defer func() { _ = opts.Destroy() }()
+
+	_ = opts.SetIntraOpNumThreads(1)
+	_ = opts.SetInterOpNumThreads(1)
+	_ = opts.SetExecutionMode(ort.ExecutionModeSequential)
+	_ = opts.AddSessionConfigEntry("session.intra_op.allow_spinning", "0")
+	_ = opts.AddSessionConfigEntry("session.inter_op.allow_spinning", "0")
+
+	session, err := ort.NewDynamicAdvancedSession(path, inputNames, outputNames, opts)
 	if err != nil {
 		return nil, fmt.Errorf("load ONNX model %q: %w", path, err)
 	}

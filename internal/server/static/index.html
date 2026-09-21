@@ -209,26 +209,39 @@
 
       <section class="settings-group">
         <h2 class="settings-title">PC audio</h2>
-        <div class="setting-row">
+        <div class="setting-row info-row" id="audio-status-row">
           <div class="setting-info">
-            <div class="setting-label">enable PC audio mode</div>
+            <div class="setting-label">stream status</div>
             <div class="setting-desc">
-              Accept audio streams from the novabot-client on another machine.
-              When disabled, the server rejects PC_AUDIO mode switches and never
-              binds the UDP listener.
+              <div id="audio-status-text">not active</div>
+              <div id="audio-status-detail" class="status-detail"></div>
             </div>
           </div>
-          <label class="toggle">
-            <input type="checkbox" id="toggle-pc-audio">
-            <span class="slider"></span>
-          </label>
+          <span class="status-dot" id="audio-status-dot" data-state="idle"></span>
         </div>
+
         <div class="setting-row info-row">
           <div class="setting-info">
-            <div class="setting-label">client connection</div>
+            <div class="setting-label">client command</div>
             <div class="setting-desc">
-              Run on the client machine:
-              <code id="client-cmd">novabot-client --server &lt;this-host&gt; --port 4000</code>
+              On the machine you want to stream from:
+              <code id="client-cmd">novabot-client --server &lt;host&gt; --port 4000</code>
+            </div>
+          </div>
+        </div>
+
+        <div class="setting-row info-row">
+          <div class="setting-info">
+            <div class="setting-label">audio quality</div>
+            <div class="setting-desc">
+              Set <code>AUDIO_QUALITY</code> on both machines.
+              <br>
+              <span class="preset-list">
+                <span class="preset"><b>low</b> 256 kbps · 16kHz mono</span>
+                <span class="preset"><b>standard</b> 1536 kbps · 48kHz stereo 16-bit</span>
+                <span class="preset"><b>high</b> 3072 kbps · 48kHz stereo 32-bit</span>
+                <span class="preset"><b>studio</b> 6144 kbps · 96kHz stereo 32-bit</span>
+              </span>
             </div>
           </div>
         </div>

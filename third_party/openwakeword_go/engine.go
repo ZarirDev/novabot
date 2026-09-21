@@ -186,7 +186,6 @@ func (e *Engine) predictLocked(samples Samples) (map[string]float32, error) {
 	}
 	if e.vad != nil {
 		detected, err := e.vad.DetectContext(samples)
-
 		if err != nil {
 			return nil, err
 		}

@@ -91,3 +91,8 @@ func (m *Manager) SetMode(newMode AppMode) error {
 	m.currentMode = newMode
 	return nil
 }
+
+// Player returns the audio player, for status endpoints and diagnostics.
+func (m *Manager) Player() *audio.AudioPlayer {
+	return m.player
+}

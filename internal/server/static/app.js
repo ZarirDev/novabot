@@ -304,7 +304,7 @@ async function loadSettings() {
 
 async function saveSettings() {
   const enabled = $("toggle-pc-audio").checked;
-  console.log("[settings] saving pc_audio_enabled =", enabled);
+  console.log("[settings] setting pc_audio_enabled =", enabled);
   try {
     const r = await fetch("/api/v1/settings", {
       method: "POST",
@@ -312,11 +312,49 @@ async function saveSettings() {
       body: JSON.stringify({ pc_audio_enabled: enabled }),
     });
     settingsCache = await r.json();
-    console.log("[settings] saved:", settingsCache);
+    console.log("[settings] server says:", settingsCache);
+    // Reflect reality — server is the source of truth.
+    const toggle = $("toggle-pc-audio");
+    if (toggle) toggle.checked = !!settingsCache.pc_audio_enabled;
   } catch (err) {
     console.error("[settings] save failed:", err);
     $("toggle-pc-audio").checked = !enabled;
   }
+}
+
+async function pollAudioStatus() {
+  if (currentPage !== "settings") return;
+  let s;
+  try {
+    const r = await fetch("/api/v1/audio/status", { cache: "no-store" });
+    s = await r.json();
+  } catch { return; }
+
+  const dot = $("audio-status-dot");
+  const text = $("audio-status-text");
+  const detail = $("audio-status-detail");
+  if (!dot || !text || !detail) return;
+
+  let state, label;
+  if (!s.listening) {
+    state = "idle"; label = "not active";
+    detail.textContent = "bot is not in PC_AUDIO mode";
+  } else if (s.connected) {
+    state = "connected"; label = "streaming";
+    detail.textContent =
+      `${s.packets_total} packets · ${s.kbps.toFixed(0)} kbps (of ${s.expected_kbps}) · ` +
+      `latency p50 ${s.latency_p50_ms.toFixed(1)}ms / p95 ${s.latency_p95_ms.toFixed(1)}ms`;
+  } else {
+    state = "disconnected"; label = "disconnected";
+    const last = s.last_packet && s.last_packet !== "0001-01-01T00:00:00Z"
+      ? new Date(s.last_packet) : null;
+    detail.textContent = last
+      ? `last packet ${Math.round((Date.now() - last.getTime()) / 1000)}s ago — is the client running?`
+      : "no packets received yet — is the client running?";
+  }
+
+  dot.setAttribute("data-state", state);
+  text.textContent = `${label} (${s.quality}, ${s.sample_rate} Hz, ${s.format})`;
 }
 
 // ── event wiring ────────────────────────────────────────
@@ -372,4 +410,7 @@ $("toggle-pc-audio")?.addEventListener("change", saveSettings);
 pollStats();
 setInterval(pollStats, 1500);
 setInterval(musicStatus, 1000);
+setInterval(() => { if (currentPage === "settings") loadSettings(); }, 2000);
+setInterval(pollAudioStatus, 1000);
 musicStatus();
+pollAudioStatus();
