@@ -8,14 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG VOSK_VERSION=0.3.45
 ARG ORT_VERSION=1.29.0
 
-# Vosk
 RUN curl -fsSL -o /tmp/vosk.zip \
       "https://github.com/alphacep/vosk-api/releases/download/v${VOSK_VERSION}/vosk-linux-x86_64-${VOSK_VERSION}.zip" \
     && unzip -q /tmp/vosk.zip -d /opt \
     && mv /opt/vosk-linux-x86_64-${VOSK_VERSION} /opt/vosk \
     && rm /tmp/vosk.zip
 
-# ONNX Runtime
 RUN curl -fsSL -o /tmp/ort.tgz \
       "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
     && tar -xzf /tmp/ort.tgz -C /opt \
@@ -23,8 +21,13 @@ RUN curl -fsSL -o /tmp/ort.tgz \
     && rm /tmp/ort.tgz
 
 WORKDIR /app
+
+# Module files + local replace target must be present before go mod download,
+# otherwise the replace directive in go.mod can't resolve.
 COPY go.mod go.sum ./
+COPY third_party ./third_party
 RUN go mod download
+
 COPY . .
 
 ENV CGO_ENABLED=1
@@ -40,15 +43,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     alsa-utils ca-certificates curl unzip mpv python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# yt-dlp from pip — always current
 RUN pip3 install --break-system-packages --no-cache-dir yt-dlp
 
-# native libraries
 COPY --from=builder /opt/vosk/libvosk.so /usr/local/lib/libvosk.so
 COPY --from=builder /opt/ort/lib/libonnxruntime.so /usr/local/lib/libonnxruntime.so
 RUN ldconfig
 
-# models — Vosk
 ARG VOSK_MODEL=vosk-model-small-en-us-0.15
 RUN mkdir -p /opt/vosk-models \
     && curl -fsSL -o /tmp/model.zip "https://alphacephei.com/vosk/models/${VOSK_MODEL}.zip" \
@@ -56,15 +56,11 @@ RUN mkdir -p /opt/vosk-models \
     && mv /opt/vosk-models/${VOSK_MODEL} /opt/vosk-models/default \
     && rm /tmp/model.zip
 
-# models — openWakeWord shared
 RUN mkdir -p /opt/oww-models \
     && for f in melspectrogram.onnx embedding_model.onnx silero_vad.onnx; do \
          curl -fsSL -o "/opt/oww-models/$f" \
            "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/$f"; \
        done
-
-# user-supplied wake model — expected in the build context root
-COPY hey_nova.onnx /opt/oww-models/hey_nova.onnx
 
 WORKDIR /app
 COPY --from=builder /app/novabot /app/novabot
