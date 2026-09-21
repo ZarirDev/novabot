@@ -46,6 +46,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/stats", s.handleStats)
 	mux.HandleFunc("/api/v1/audio/status", s.handleAudioStatus)
 	mux.HandleFunc("/api/v1/audio/quality", s.handleAudioQuality)
+	mux.HandleFunc("/api/v1/audio/volume", s.handleAudioVolume)
 	mux.HandleFunc("/api/v1/settings", s.handleSettings)
 
 	s.music.RegisterRoutes(mux)
@@ -191,4 +192,33 @@ func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+}
+
+func (s *Server) handleAudioVolume(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+
+	switch r.Method {
+	case http.MethodGet:
+		_ = json.NewEncoder(w).Encode(map[string]int{
+			"percent": audio.Volume(),
+		})
+
+	case http.MethodPost:
+		var req struct {
+			Percent *int `json:"percent"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Percent == nil {
+			http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+			return
+		}
+		applied := audio.SetVolume(*req.Percent)
+		log.Printf("[AUDIO] volume set to %d%%", applied)
+		_ = json.NewEncoder(w).Encode(map[string]int{
+			"percent": applied,
+		})
+
+	default:
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+	}
 }

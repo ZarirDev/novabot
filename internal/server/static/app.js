@@ -16,6 +16,11 @@ function route() {
 
   if (page === "settings") loadSettings();
   if (page === "music") musicStatus();
+  if (page === "settings") {
+    loadSettings();
+    loadQuality();
+    loadVolume();
+  }
 }
 
 window.addEventListener("hashchange", route);
@@ -410,6 +415,56 @@ function renderQualityPicker() {
   });
 }
 
+let volumeCache = 100;
+
+async function loadVolume() {
+  try {
+    const r = await fetch("/api/v1/audio/volume", { cache: "no-store" });
+    const data = await r.json();
+    volumeCache = data.percent ?? 100;
+    updateVolumeUI();
+  } catch {}
+}
+
+function updateVolumeUI() {
+  const slider = $("volume-slider");
+  if (!slider) return;
+  if (document.activeElement !== slider) {
+    slider.value = volumeCache;
+  }
+  $("volume-pct").textContent = `${volumeCache}%`;
+  const db = volumeCache <= 0
+    ? "-∞"
+    : (20 * Math.log10(volumeCache / 100)).toFixed(1);
+  $("volume-db").textContent = `${db} dB`;
+}
+
+async function saveVolume(pct) {
+  try {
+    const r = await fetch("/api/v1/audio/volume", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ percent: pct }),
+    });
+    const data = await r.json();
+    volumeCache = data.percent ?? pct;
+    updateVolumeUI();
+  } catch (err) {
+    console.error("[volume] save failed:", err);
+  }
+}
+
+$("volume-slider")?.addEventListener("input", e => {
+  const pct = parseInt(e.target.value, 10);
+  $("volume-pct").textContent = `${pct}%`;
+  const db = pct <= 0 ? "-∞" : (20 * Math.log10(pct / 100)).toFixed(1);
+  $("volume-db").textContent = `${db} dB`;
+});
+
+$("volume-slider")?.addEventListener("change", e => {
+  saveVolume(parseInt(e.target.value, 10));
+});
+
 // ── event wiring ────────────────────────────────────────
 
 // search
@@ -467,10 +522,13 @@ setInterval(() => { if (currentPage === "settings") loadSettings(); }, 2000);
 setInterval(pollAudioStatus, 1000);
 musicStatus();
 pollAudioStatus();
-if (page === "settings") {
-  loadSettings();
-  loadQuality();
-}
+setInterval(() => {
+  if (currentPage === "settings") {
+    loadSettings();
+    loadQuality();
+    loadVolume();
+  }
+}, 3000);
 setInterval(() => {
   if (currentPage === "settings") {
     loadSettings();

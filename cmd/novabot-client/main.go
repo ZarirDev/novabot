@@ -38,7 +38,7 @@ func main() {
 	// so the first capture uses the right format.
 	var qualityCh <-chan string
 	if !*noSync {
-		qualityCh = client.WatchQuality(*server, *httpPort, 3*time.Second)
+		qualityCh = client.WatchQuality(*server, *httpPort, 500*time.Millisecond)
 
 		// Block briefly for the first value so we don't spin up with the
 		// wrong format.
@@ -49,7 +49,7 @@ func main() {
 			} else {
 				log.Printf("[CLIENT] using quality %q from server", name)
 			}
-		case <-time.After(4 * time.Second):
+		case <-time.After(3 * time.Second):
 			log.Printf("[CLIENT] server did not respond in time — using local quality %q",
 				audio.ActiveQuality().Name)
 		}

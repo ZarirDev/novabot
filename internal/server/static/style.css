@@ -861,3 +861,56 @@ html, body {
 @media (max-width: 560px) {
   .quality-picker { grid-template-columns: 1fr; }
 }
+
+/* ── VOLUME CONTROL ────────────────────────────── */
+
+.volume-control {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 200px;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+
+#volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 3px;
+  background: var(--border-2);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+#volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(240,180,41,0.4);
+}
+#volume-slider::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+.volume-readout {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.volume-readout .dim { color: var(--text-mute); }
+
+@media (max-width: 760px) {
+  .volume-control { min-width: 0; width: 100%; }
+}

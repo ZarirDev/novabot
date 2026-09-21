@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-// SpeakerDevice returns the aplay device to output to.
-// Override with SPEAKER_DEVICE=plughw:1,0 / hdmi:CARD=... / etc.
 func SpeakerDevice() string {
 	if d := os.Getenv("SPEAKER_DEVICE"); d != "" {
 		return d
@@ -21,7 +19,6 @@ func SpeakerDevice() string {
 	return "pulse"
 }
 
-// UDPStatus is a snapshot of the PC_AUDIO stream health, safe to serialise.
 type UDPStatus struct {
 	Listening    bool      `json:"listening"`
 	Connected    bool      `json:"connected"`
@@ -41,7 +38,6 @@ type AudioPlayer struct {
 	mu           sync.Mutex
 	udpListening bool
 
-	// telemetry, guarded by teleMu
 	teleMu       sync.Mutex
 	lastPacket   time.Time
 	packetsTotal uint64
@@ -73,7 +69,12 @@ func (ap *AudioPlayer) PlayWAV(wavData []byte) error {
 		return fmt.Errorf("aplay start error: %w", err)
 	}
 
+	pid := cmd.Process.Pid
+	registerAplay(pid)
+	go applyVolumeToPID(pid)
+
 	if _, err := stdin.Write(wavData); err != nil {
+		unregisterAplay(pid)
 		return fmt.Errorf("aplay write error: %w", err)
 	}
 	_ = stdin.Close()
@@ -85,14 +86,16 @@ func (ap *AudioPlayer) PlayWAV(wavData []byte) error {
 		stderrBuf = buf[:n]
 	}
 
-	if err := cmd.Wait(); err != nil {
+	err = cmd.Wait()
+	unregisterAplay(pid)
+
+	if err != nil {
 		return fmt.Errorf("aplay failed (device=%s): %w | stderr: %s",
 			device, err, string(stderrBuf))
 	}
 	return nil
 }
 
-// UDPStatus returns a thread-safe snapshot for the HTTP layer.
 func (ap *AudioPlayer) UDPStatus() UDPStatus {
 	q := ActiveQuality()
 
@@ -103,7 +106,6 @@ func (ap *AudioPlayer) UDPStatus() UDPStatus {
 	ap.teleMu.Lock()
 	defer ap.teleMu.Unlock()
 
-	// "Connected" = we've received a packet within the last 3 seconds.
 	connected := !ap.lastPacket.IsZero() && time.Since(ap.lastPacket) < 3*time.Second
 
 	return UDPStatus{
@@ -122,10 +124,6 @@ func (ap *AudioPlayer) UDPStatus() UDPStatus {
 	}
 }
 
-// StartUDPStreamListener binds to port, spawns aplay in the configured
-// format, and pumps received PCM to it. Blocks until stopChan is closed.
-//
-// Packet format: [8-byte LE nanosecond timestamp][raw PCM].
 func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}) {
 	ap.mu.Lock()
 	if ap.udpListening {
@@ -172,14 +170,21 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 		log.Printf("[AUDIO] aplay start failed: %v", err)
 		return
 	}
-	log.Printf("[AUDIO] aplay playback started (pid=%d, device=%s)",
-		cmd.Process.Pid, SpeakerDevice())
+	pid := cmd.Process.Pid
+	registerAplay(pid)
+	go applyVolumeToPID(pid)
+
+	log.Printf("[AUDIO] aplay playback started (pid=%d, device=%s, volume=%d%%)",
+		pid, SpeakerDevice(), Volume())
+
+	defer unregisterAplay(pid)
 
 	var (
-		packets   uint64
-		bytes     uint64
-		lastStat  = time.Now()
-		latencies []time.Duration
+		packets       uint64
+		bytes         uint64
+		mismatchCount int
+		lastStat      = time.Now()
+		latencies     []time.Duration
 	)
 
 	buf := make([]byte, 32*1024)
@@ -197,21 +202,25 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 		default:
 		}
 
-		// Short deadline so we notice stopChan even with no traffic.
-		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		n, src, err := conn.ReadFromUDP(buf)
 		now := time.Now()
+
+		// ── Stats tick ──────────────────────────────────────
+		// Checked at the TOP of the loop so it fires during continuous
+		// traffic, not just on read timeouts. Emits every 5 seconds.
+		if packets > 0 && now.Sub(lastStat) >= 5*time.Second {
+			ap.recordStats(bytes, latencies, now.Sub(lastStat))
+			logRXStats(packets, bytes, latencies, now.Sub(lastStat))
+			lastStat = now
+			bytes = 0
+			latencies = latencies[:0]
+		}
+
+		_ = conn.SetReadDeadline(now.Add(500 * time.Millisecond))
+		n, _, err := conn.ReadFromUDP(buf)
 
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				ap.checkDisconnect(now)
-				if packets > 0 && now.Sub(lastStat) >= 5*time.Second {
-					ap.recordStats(bytes, latencies, now.Sub(lastStat))
-					logRXStats(packets, bytes, latencies, now.Sub(lastStat), nil)
-					lastStat = now
-					bytes = 0
-					latencies = latencies[:0]
-				}
 				continue
 			}
 			log.Printf("[AUDIO] UDP read error: %v", err)
@@ -220,6 +229,28 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 
 		if n < 8 {
 			continue
+		}
+
+		expectedPCM := q.FramesPerPeriod() * q.Channels * q.BytesPerSmpl
+		expectedTotal := expectedPCM + 8
+
+		if n != expectedTotal {
+			mismatchCount++
+			if mismatchCount == 1 {
+				log.Printf("[AUDIO] format mismatch: got %d-byte packet, expected %d — "+
+					"client is on a different quality, waiting for it to catch up",
+					n, expectedTotal)
+			} else if mismatchCount%500 == 0 {
+				log.Printf("[AUDIO] still mismatched after %d packets — "+
+					"client hasn't detected the quality change",
+					mismatchCount)
+			}
+			continue
+		}
+		if mismatchCount > 0 {
+			log.Printf("[AUDIO] format recovered after %d dropped packets — resuming",
+				mismatchCount)
+			mismatchCount = 0
 		}
 
 		sentNs := int64(binary.LittleEndian.Uint64(buf[:8]))
@@ -243,13 +274,9 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 		if _, werr := stdin.Write(pcm); werr != nil {
 			log.Printf("[AUDIO] aplay write error: %v", werr)
 		}
-
-		_ = src // silence "unused" if logRXStats signature changes
 	}
 }
 
-// markPacket updates telemetry and logs a single transition line when
-// the client first connects (or reconnects after a gap).
 func (ap *AudioPlayer) markPacket(now time.Time) {
 	ap.teleMu.Lock()
 	wasConnected := ap.connected
@@ -265,8 +292,6 @@ func (ap *AudioPlayer) markPacket(now time.Time) {
 	}
 }
 
-// checkDisconnect emits a single log line when the client has been silent
-// for >3 seconds and we were previously connected.
 func (ap *AudioPlayer) checkDisconnect(now time.Time) {
 	ap.teleMu.Lock()
 	wasConnected := ap.connected
@@ -281,7 +306,6 @@ func (ap *AudioPlayer) checkDisconnect(now time.Time) {
 	}
 }
 
-// recordStats stores the latest 5s window for the HTTP layer.
 func (ap *AudioPlayer) recordStats(bytes uint64, latencies []time.Duration, window time.Duration) {
 	ap.teleMu.Lock()
 	defer ap.teleMu.Unlock()
@@ -296,7 +320,7 @@ func (ap *AudioPlayer) recordStats(bytes uint64, latencies []time.Duration, wind
 	}
 }
 
-func logRXStats(packets, bytes uint64, latencies []time.Duration, window time.Duration, src *net.UDPAddr) {
+func logRXStats(packets, bytes uint64, latencies []time.Duration, window time.Duration) {
 	kbps := float64(bytes) * 8 / 1000 / window.Seconds()
 	msg := fmt.Sprintf("[AUDIO] rx %d pkts, %.0f kbps", packets, kbps)
 	if len(latencies) > 0 {
@@ -308,9 +332,6 @@ func logRXStats(packets, bytes uint64, latencies []time.Duration, window time.Du
 		msg += fmt.Sprintf(", latency p50=%.1fms p95=%.1fms",
 			float64(p50.Microseconds())/1000,
 			float64(p95.Microseconds())/1000)
-	}
-	if src != nil {
-		msg += fmt.Sprintf(", last=%s", src)
 	}
 	log.Println(msg)
 }
