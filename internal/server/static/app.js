@@ -1,5 +1,5 @@
 // ── router ──────────────────────────────────────────────
-const PAGES = ["dashboard", "music"];
+const PAGES = ["dashboard", "music", "settings"];
 let currentPage = "dashboard";
 
 function route() {
@@ -13,6 +13,9 @@ function route() {
   document.querySelectorAll(".nav-item[data-page]").forEach(el => {
     el.classList.toggle("active", el.dataset.page === page);
   });
+
+  if (page === "settings") loadSettings();
+  if (page === "music") musicStatus();
 }
 
 window.addEventListener("hashchange", route);
@@ -62,6 +65,23 @@ function drawSpark(svg, data, max) {
   area += ` L${W},${H} Z`;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.innerHTML = `<path class="fill" d="${area}"/><path class="line" d="${line}"/>`;
+}
+
+function renderRows(el, rows) {
+  if (!el) return;
+  if (!rows || rows.length === 0) {
+    el.innerHTML = `<div class="list-row"><span class="k">no data</span></div>`;
+    return;
+  }
+  el.innerHTML = rows.map(r =>
+    `<div class="list-row"><span class="k" title="${r.k}">${r.k}</span><span class="v ${r.cls || ""}">${r.v}</span></div>`
+  ).join("");
+}
+
+function escapeHTML(s) {
+  return String(s || "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
 }
 
 // ── dashboard ───────────────────────────────────────────
@@ -131,14 +151,6 @@ async function pollStats() {
   $("foot-go").textContent = `goroutines ${s.goroutines}`;
 }
 
-function renderRows(el, rows) {
-  if (!el) return;
-  if (!rows || rows.length === 0) { el.innerHTML = `<div class="list-row"><span class="k">no data</span></div>`; return; }
-  el.innerHTML = rows.map(r =>
-    `<div class="list-row"><span class="k" title="${r.k}">${r.k}</span><span class="v ${r.cls || ""}">${r.v}</span></div>`
-  ).join("");
-}
-
 // ── music ───────────────────────────────────────────────
 
 let seeking = false;
@@ -185,7 +197,7 @@ async function doSearch() {
   console.log(`[music] search start: "${q}"`);
 
   const ctrl = new AbortController();
-  const timeout = setTimeout(() => ctrl.abort(), 50000); // longer than Go's 45s
+  const timeout = setTimeout(() => ctrl.abort(), 50000);
 
   try {
     const r = await fetch(
@@ -197,7 +209,6 @@ async function doSearch() {
     const elapsed = Math.round(performance.now() - t0);
     console.log(`[music] search response: ${r.status} in ${elapsed}ms`);
 
-    // Try to parse JSON regardless of status so we can surface Go's error body.
     let data;
     const text = await r.text();
     try {
@@ -270,10 +281,42 @@ async function doSearch() {
   }
 }
 
-function escapeHTML(s) {
-  return String(s || "").replace(/[&<>"']/g, c => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
+// ── settings ────────────────────────────────────────────
+
+let settingsCache = { pc_audio_enabled: true };
+
+async function loadSettings() {
+  try {
+    const r = await fetch("/api/v1/settings", { cache: "no-store" });
+    settingsCache = await r.json();
+
+    const toggle = $("toggle-pc-audio");
+    if (toggle) toggle.checked = !!settingsCache.pc_audio_enabled;
+
+    const cmdEl = $("client-cmd");
+    if (cmdEl) {
+      cmdEl.textContent = `novabot-client --server ${location.hostname} --port 4000`;
+    }
+  } catch (err) {
+    console.error("[settings] load failed:", err);
+  }
+}
+
+async function saveSettings() {
+  const enabled = $("toggle-pc-audio").checked;
+  console.log("[settings] saving pc_audio_enabled =", enabled);
+  try {
+    const r = await fetch("/api/v1/settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pc_audio_enabled: enabled }),
+    });
+    settingsCache = await r.json();
+    console.log("[settings] saved:", settingsCache);
+  } catch (err) {
+    console.error("[settings] save failed:", err);
+    $("toggle-pc-audio").checked = !enabled;
+  }
 }
 
 // ── event wiring ────────────────────────────────────────
@@ -321,6 +364,9 @@ vol?.addEventListener("input", () => {
     body: JSON.stringify({ volume: parseFloat(vol.value) }),
   });
 });
+
+// settings toggle
+$("toggle-pc-audio")?.addEventListener("change", saveSettings);
 
 // ── poll loops ──────────────────────────────────────────
 pollStats();

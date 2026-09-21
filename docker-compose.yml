@@ -8,16 +8,20 @@ services:
     network_mode: host
     devices:
       - "/dev/snd:/dev/snd"
+    volumes:
+      # bind-mount the wake model so you can swap it without rebuilding
+      - ./hey_nova.onnx:/opt/oww-models/hey_nova.onnx:ro
+      # lm-sensors host data for temperature readings
+      - /sys/class/hwmon:/sys/class/hwmon:ro
     environment:
       - HTTP_PORT=8080
       - UDP_AUDIO_PORT=4000
       - WAKE_WORD=nova
       - DETECTOR_TYPE=openwakeword
-      - MODEL_PATH=/opt/vosk-models/default
-      - ONNX_RUNTIME_PATH=/usr/local/lib/libonnxruntime.so
-      - OWW_MODEL_DIR=/opt/oww-models
       - WAKE_MODEL_FILE=hey_nova.onnx
       - MIC_DEVICE=pulse
       - SPEAKER_DEVICE=pulse
-    # optional: cap memory so Jellyfin/Immich always win the OOM fight
+      - OMP_NUM_THREADS=1
+      - WAKE_SILENCE_RMS=400
+      - WAKE_SILENCE_FRAMES=25
     mem_limit: 512m

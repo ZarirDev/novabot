@@ -13,9 +13,10 @@ import (
 var staticFS embed.FS
 
 type Server struct {
-	mgr   *mode.Manager
-	stats *StatsCollector
-	music *MusicServer
+	mgr      *mode.Manager
+	stats    *StatsCollector
+	music    *MusicServer
+	settings *Settings
 }
 
 type ModeRequest struct {
@@ -32,9 +33,10 @@ func NewServer(mgr *mode.Manager) *Server {
 	stats.Start()
 
 	return &Server{
-		mgr:   mgr,
-		stats: stats,
-		music: NewMusicServer(),
+		mgr:      mgr,
+		stats:    stats,
+		music:    NewMusicServer(),
+		settings: NewSettings(),
 	}
 }
 
@@ -42,6 +44,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/mode", s.handleMode)
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
 	mux.HandleFunc("/api/v1/stats", s.handleStats)
+	mux.HandleFunc("/api/v1/settings", s.handleSettings)
 
 	s.music.RegisterRoutes(mux)
 
@@ -56,6 +59,17 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(s.stats.Snapshot())
+}
+
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.settings.HandleGet(w, r)
+	case http.MethodPost:
+		s.settings.HandlePost(w, r)
+	default:
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +93,11 @@ func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 		targetMode := mode.AppMode(req.Mode)
 		if targetMode != mode.ModeAssistant && targetMode != mode.ModePCAudio {
 			http.Error(w, `{"error":"invalid mode"}`, http.StatusBadRequest)
+			return
+		}
+
+		if targetMode == mode.ModePCAudio && !s.settings.Get().PCAudioEnabled {
+			http.Error(w, `{"error":"PC audio mode is disabled in settings"}`, http.StatusForbidden)
 			return
 		}
 

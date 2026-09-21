@@ -1,0 +1,31 @@
+# system / ide
+.idea/
+.vscode/
+.DS_Store
+
+# go
+bin/
+*.test
+*.out
+coverage.out
+*.coverprofile
+
+# local caches
+.gocache/
+.gomodcache/
+
+# native/runtime binaries
+*.dylib
+*.so
+*.dll
+
+# local model/runtime assets
+models/*.onnx
+models/*.bin
+runtime/*
+!models/.gitkeep
+!runtime/.gitkeep
+
+# local env
+.env
+.env.*
