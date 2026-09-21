@@ -141,3 +141,24 @@ func (c *Capture) onRecvFrames(out, in []byte, frameCount uint32) {
 		fn(buf)
 	}
 }
+
+// Restart tears down the current capture device and rebuilds it with the
+// currently active quality preset. Used when the server signals a change.
+func (c *Capture) Restart(onData func([]byte)) error {
+	c.Stop()
+
+	newCap, err := NewCapture()
+	if err != nil {
+		return fmt.Errorf("rebuild capture: %w", err)
+	}
+
+	// Steal the new capture's internals into this one.
+	c.mu.Lock()
+	c.ctx = newCap.ctx
+	c.device = newCap.device
+	c.info = newCap.info
+	c.qual = newCap.qual
+	c.mu.Unlock()
+
+	return c.Start(onData)
+}

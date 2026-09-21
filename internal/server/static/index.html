@@ -209,6 +209,22 @@
 
       <section class="settings-group">
         <h2 class="settings-title">PC audio</h2>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">pc audio mode</div>
+            <div class="setting-desc">
+              When on, the bot stops listening for wake words and streams
+              audio from the client machine to the speakers. Toggle off to
+              return to wake-word listening.
+            </div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="toggle-pc-audio">
+            <span class="slider"></span>
+          </label>
+        </div>
+
         <div class="setting-row info-row" id="audio-status-row">
           <div class="setting-info">
             <div class="setting-label">stream status</div>
@@ -234,14 +250,11 @@
           <div class="setting-info">
             <div class="setting-label">audio quality</div>
             <div class="setting-desc">
-              Set <code>AUDIO_QUALITY</code> on both machines.
-              <br>
-              <span class="preset-list">
-                <span class="preset"><b>low</b> 256 kbps · 16kHz mono</span>
-                <span class="preset"><b>standard</b> 1536 kbps · 48kHz stereo 16-bit</span>
-                <span class="preset"><b>high</b> 3072 kbps · 48kHz stereo 32-bit</span>
-                <span class="preset"><b>studio</b> 6144 kbps · 96kHz stereo 32-bit</span>
-              </span>
+              Changes apply instantly — the server restarts its listener and
+              any running client picks up the new format on its next poll.
+            </div>
+            <div class="quality-picker" id="quality-picker">
+              <div class="empty">loading…</div>
             </div>
           </div>
         </div>

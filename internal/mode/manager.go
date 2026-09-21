@@ -24,12 +24,11 @@ type Manager struct {
 	player      *audio.AudioPlayer
 	udpPort     int
 	udpStopChan chan struct{}
+	udpDoneChan chan struct{}
 }
 
 func NewManager(detector wakeword.Detector, player *audio.AudioPlayer, udpPort int) *Manager {
 	return &Manager{
-		// currentMode intentionally left as zero-value ("") so the first
-		// SetMode call actually transitions and starts the detector.
 		detector: detector,
 		player:   player,
 		udpPort:  udpPort,
@@ -40,6 +39,65 @@ func (m *Manager) GetMode() AppMode {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.currentMode
+}
+
+func (m *Manager) Player() *audio.AudioPlayer {
+	return m.player
+}
+
+// SetQuality changes the stream format. If we're currently in PC_AUDIO mode
+// this restarts the UDP listener with the new format. Clients pick up the
+// change on their next quality poll.
+func (m *Manager) SetQuality(name string) error {
+	if err := audio.SetActiveQuality(name); err != nil {
+		return err
+	}
+	log.Printf("[MODE] audio quality set to %q", name)
+
+	m.mu.Lock()
+	inPCAudio := m.currentMode == ModePCAudio
+	m.mu.Unlock()
+
+	if inPCAudio {
+		log.Printf("[MODE] restarting UDP listener with new quality")
+		if err := m.restartUDPListenerLocked(); err != nil {
+			return fmt.Errorf("restart listener: %w", err)
+		}
+	}
+	return nil
+}
+
+// restartUDPListenerLocked stops the running listener (if any), waits for
+// it to fully exit, then starts a fresh one. Caller must not hold m.mu.
+func (m *Manager) restartUDPListenerLocked() error {
+	m.mu.Lock()
+	stop := m.udpStopChan
+	done := m.udpDoneChan
+	m.udpStopChan = nil
+	m.udpDoneChan = nil
+	m.mu.Unlock()
+
+	if stop != nil {
+		close(stop)
+	}
+	if done != nil {
+		<-done // wait for the old listener goroutine to exit
+	}
+
+	stop = make(chan struct{})
+	done = make(chan struct{})
+
+	m.mu.Lock()
+	m.udpStopChan = stop
+	m.udpDoneChan = done
+	m.mu.Unlock()
+
+	go func() {
+		defer close(done)
+		m.player.StartUDPStreamListener(m.udpPort, stop)
+	}()
+
+	return nil
 }
 
 func (m *Manager) SetMode(newMode AppMode) error {
@@ -54,20 +112,34 @@ func (m *Manager) SetMode(newMode AppMode) error {
 
 	switch newMode {
 	case ModePCAudio:
-		log.Println("[MODE] Completely disabling wake-word detector and closing microphone device...")
+		log.Println("[MODE] disabling wake-word detector, opening UDP stream")
 		m.detector.Stop()
 
+		// Same restart logic, just under the held lock.
 		if m.udpStopChan != nil {
 			close(m.udpStopChan)
 		}
-		m.udpStopChan = make(chan struct{})
+		if m.udpDoneChan != nil {
+			<-m.udpDoneChan
+		}
 
-		go m.player.StartUDPStreamListener(m.udpPort, m.udpStopChan)
+		m.udpStopChan = make(chan struct{})
+		m.udpDoneChan = make(chan struct{})
+		stop := m.udpStopChan
+		done := m.udpDoneChan
+
+		go func() {
+			defer close(done)
+			m.player.StartUDPStreamListener(m.udpPort, stop)
+		}()
 
 	case ModeAssistant:
 		if m.udpStopChan != nil {
 			close(m.udpStopChan)
 			m.udpStopChan = nil
+		}
+		if m.udpDoneChan != nil {
+			m.udpDoneChan = nil
 		}
 
 		ctx := context.Background()
@@ -77,7 +149,6 @@ func (m *Manager) SetMode(newMode AppMode) error {
 			if err := m.player.PlayWAV(pingAudio); err != nil {
 				log.Printf("[AUDIO] ping playback failed: %v", err)
 			}
-
 			ttsAudio := audio.GenerateTTSAudio(16000)
 			if err := m.player.PlayWAV(ttsAudio); err != nil {
 				log.Printf("[AUDIO] tts playback failed: %v", err)
@@ -90,9 +161,4 @@ func (m *Manager) SetMode(newMode AppMode) error {
 
 	m.currentMode = newMode
 	return nil
-}
-
-// Player returns the audio player, for status endpoints and diagnostics.
-func (m *Manager) Player() *audio.AudioPlayer {
-	return m.player
 }

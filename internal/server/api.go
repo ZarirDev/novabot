@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/ZarirDev/novabot/internal/audio"
 	"github.com/ZarirDev/novabot/internal/mode"
 )
 
@@ -44,6 +45,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
 	mux.HandleFunc("/api/v1/stats", s.handleStats)
 	mux.HandleFunc("/api/v1/audio/status", s.handleAudioStatus)
+	mux.HandleFunc("/api/v1/audio/quality", s.handleAudioQuality)
 	mux.HandleFunc("/api/v1/settings", s.handleSettings)
 
 	s.music.RegisterRoutes(mux)
@@ -107,6 +109,39 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 		_ = json.NewEncoder(w).Encode(map[string]bool{
 			"pc_audio_enabled": s.mgr.GetMode() == mode.ModePCAudio,
+		})
+
+	default:
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleAudioQuality(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+
+	switch r.Method {
+	case http.MethodGet:
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"current": audio.ActiveQuality(),
+			"presets": audio.AllQualities(),
+		})
+
+	case http.MethodPost:
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+		if err := s.mgr.SetQuality(req.Name); err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"current": audio.ActiveQuality(),
+			"status":  "applied",
 		})
 
 	default:

@@ -806,3 +806,58 @@ html, body {
   font-weight: 500;
   margin-right: 6px;
 }
+
+/* ── QUALITY PICKER ────────────────────────────── */
+
+.quality-picker {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.quality-opt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--mono);
+  transition: border-color 150ms, background 150ms;
+}
+.quality-opt:hover {
+  border-color: var(--border-2);
+}
+.quality-opt.active {
+  border-color: var(--accent);
+  background: rgba(240,180,41,0.05);
+}
+.quality-opt.loading {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.quality-opt .q-name {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+.quality-opt.active .q-name {
+  color: var(--accent);
+}
+.quality-opt .q-desc {
+  font-size: 10px;
+  color: var(--text-mute);
+  letter-spacing: 0.02em;
+  line-height: 1.4;
+}
+
+@media (max-width: 560px) {
+  .quality-picker { grid-template-columns: 1fr; }
+}

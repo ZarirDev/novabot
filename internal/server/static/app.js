@@ -357,6 +357,59 @@ async function pollAudioStatus() {
   text.textContent = `${label} (${s.quality}, ${s.sample_rate} Hz, ${s.format})`;
 }
 
+let qualityCache = null;
+
+async function loadQuality() {
+  try {
+    const r = await fetch("/api/v1/audio/quality", { cache: "no-store" });
+    qualityCache = await r.json();
+    renderQualityPicker();
+  } catch (err) {
+    console.error("[quality] load failed:", err);
+  }
+}
+
+function renderQualityPicker() {
+  const el = $("quality-picker");
+  if (!el || !qualityCache) return;
+
+  const current = qualityCache.current?.name;
+  const presets = qualityCache.presets || [];
+
+  el.innerHTML = presets.map(p => `
+    <button class="quality-opt ${p.name === current ? "active" : ""}"
+            data-name="${p.name}">
+      <span class="q-name">${p.name}</span>
+      <span class="q-desc">${p.description}</span>
+    </button>
+  `).join("");
+
+  el.querySelectorAll(".quality-opt").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const name = btn.dataset.name;
+      if (name === qualityCache.current?.name) return;
+      console.log("[quality] switching to", name);
+      btn.classList.add("loading");
+      try {
+        const r = await fetch("/api/v1/audio/quality", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+        if (!r.ok) {
+          const body = await r.text();
+          console.error("[quality] switch failed:", body);
+        }
+        await loadQuality();
+      } catch (err) {
+        console.error("[quality] network error:", err);
+      } finally {
+        btn.classList.remove("loading");
+      }
+    });
+  });
+}
+
 // ── event wiring ────────────────────────────────────────
 
 // search
@@ -414,3 +467,13 @@ setInterval(() => { if (currentPage === "settings") loadSettings(); }, 2000);
 setInterval(pollAudioStatus, 1000);
 musicStatus();
 pollAudioStatus();
+if (page === "settings") {
+  loadSettings();
+  loadQuality();
+}
+setInterval(() => {
+  if (currentPage === "settings") {
+    loadSettings();
+    loadQuality();
+  }
+}, 3000);
