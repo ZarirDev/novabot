@@ -1,14 +1,21 @@
 package server
 
 import (
+	"embed"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 
 	"github.com/ZarirDev/novabot/internal/mode"
 )
 
+//go:embed static
+var staticFS embed.FS
+
 type Server struct {
-	mgr *mode.Manager
+	mgr   *mode.Manager
+	stats *StatsCollector
+	music *MusicServer
 }
 
 type ModeRequest struct {
@@ -21,12 +28,34 @@ type ModeResponse struct {
 }
 
 func NewServer(mgr *mode.Manager) *Server {
-	return &Server{mgr: mgr}
+	stats := NewStatsCollector()
+	stats.Start()
+
+	return &Server{
+		mgr:   mgr,
+		stats: stats,
+		music: NewMusicServer(),
+	}
 }
 
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/mode", s.handleMode)
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
+	mux.HandleFunc("/api/v1/stats", s.handleStats)
+
+	s.music.RegisterRoutes(mux)
+
+	sub, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		panic(err)
+	}
+	mux.Handle("/", http.FileServer(http.FS(sub)))
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(s.stats.Snapshot())
 }
 
 func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {

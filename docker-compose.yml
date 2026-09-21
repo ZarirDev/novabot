@@ -12,7 +12,12 @@ services:
       - HTTP_PORT=8080
       - UDP_AUDIO_PORT=4000
       - WAKE_WORD=nova
-      - DETECTOR_TYPE=vosk          # set to "heuristic" to force fallback
+      - DETECTOR_TYPE=openwakeword
       - MODEL_PATH=/opt/vosk-models/default
+      - ONNX_RUNTIME_PATH=/usr/local/lib/libonnxruntime.so
+      - OWW_MODEL_DIR=/opt/oww-models
+      - WAKE_MODEL_FILE=hey_nova.onnx
+      - MIC_DEVICE=pulse
+      - SPEAKER_DEVICE=pulse
     # optional: cap memory so Jellyfin/Immich always win the OOM fight
     mem_limit: 512m

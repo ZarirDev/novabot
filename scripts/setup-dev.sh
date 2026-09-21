@@ -85,3 +85,15 @@ if [[ ! -f "$DEV/models/oww/${WAKE_MODEL_FILE:-}" ]]; then
         echo "   Available: $(ls "$DEV/models/oww/" 2>/dev/null | tr '\n' ' ')"
     fi
 fi
+
+# ---------- Music dependencies (mpv + yt-dlp) ----------
+missing=""
+for bin in mpv yt-dlp; do
+    if ! command -v "$bin" >/dev/null 2>&1; then
+        missing="$missing $bin"
+    fi
+done
+if [[ -n "$missing" ]]; then
+    echo "⚠  music backend missing:$missing"
+    echo "   install: sudo apt install mpv && pipx install yt-dlp"
+fi
