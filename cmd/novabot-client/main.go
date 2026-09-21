@@ -65,7 +65,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("capture: %v", err)
 	}
-	defer capture.Stop()
+	defer capture.Close()
 
 	if err := capture.Start(streamer.Send); err != nil {
 		log.Fatalf("start capture: %v", err)
