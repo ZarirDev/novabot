@@ -1,6 +1,6 @@
 module github.com/ZarirDev/novabot
 
-go 1.27.0
+go 1.25.0
 
 require (
 	github.com/gen2brain/malgo v0.11.26
