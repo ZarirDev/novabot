@@ -16,8 +16,6 @@ type MusicServer struct {
 func NewMusicServer() *MusicServer {
 	p := music.NewPlayer()
 	if err := p.Start(); err != nil {
-		// mpv not installed or socket failed — log once, endpoints will
-		// return errors, but the rest of the bot keeps running.
 		log.Printf("[MUSIC] player unavailable: %v", err)
 	}
 	return &MusicServer{player: p}
@@ -71,24 +69,31 @@ func (m *MusicServer) handlePlay(w http.ResponseWriter, r *http.Request) {
 		URL string `json:"url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URL == "" {
+		log.Printf("[MUSIC] HTTP /play bad request: %v", err)
 		http.Error(w, `{"error":"missing url"}`, http.StatusBadRequest)
 		return
 	}
 
+	log.Printf("[MUSIC] HTTP /play url=%q", req.URL)
+
 	if err := m.player.Start(); err != nil {
+		log.Printf("[MUSIC] /play: mpv start failed: %v", err)
 		http.Error(w, `{"error":"mpv not available"}`, http.StatusServiceUnavailable)
 		return
 	}
 	if err := m.player.Load(req.URL); err != nil {
-		http.Error(w, `{"error":"play failed"}`, http.StatusInternalServerError)
+		log.Printf("[MUSIC] /play: mpv load failed: %v", err)
+		http.Error(w, `{"error":"play failed: `+err.Error()+`"}`, http.StatusInternalServerError)
 		return
 	}
 
+	log.Printf("[MUSIC] /play: ok")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "playing"})
 }
 
 func (m *MusicServer) handlePause(w http.ResponseWriter, r *http.Request) {
 	if err := m.player.TogglePause(); err != nil {
+		log.Printf("[MUSIC] /pause failed: %v", err)
 		http.Error(w, `{"error":"pause failed"}`, http.StatusInternalServerError)
 		return
 	}
@@ -96,17 +101,23 @@ func (m *MusicServer) handlePause(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *MusicServer) handleNext(w http.ResponseWriter, r *http.Request) {
-	_ = m.player.Next()
+	if err := m.player.Next(); err != nil {
+		log.Printf("[MUSIC] /next failed: %v", err)
+	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (m *MusicServer) handlePrev(w http.ResponseWriter, r *http.Request) {
-	_ = m.player.Prev()
+	if err := m.player.Prev(); err != nil {
+		log.Printf("[MUSIC] /prev failed: %v", err)
+	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (m *MusicServer) handleStop(w http.ResponseWriter, r *http.Request) {
-	_ = m.player.StopPlayback()
+	if err := m.player.StopPlayback(); err != nil {
+		log.Printf("[MUSIC] /stop failed: %v", err)
+	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
@@ -119,6 +130,7 @@ func (m *MusicServer) handleSeek(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := m.player.Seek(req.Position); err != nil {
+		log.Printf("[MUSIC] /seek %.2f failed: %v", req.Position, err)
 		http.Error(w, `{"error":"seek failed"}`, http.StatusInternalServerError)
 		return
 	}
@@ -134,6 +146,7 @@ func (m *MusicServer) handleVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := m.player.SetVolume(req.Volume); err != nil {
+		log.Printf("[MUSIC] /volume %.1f failed: %v", req.Volume, err)
 		http.Error(w, `{"error":"volume failed"}`, http.StatusInternalServerError)
 		return
 	}
