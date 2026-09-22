@@ -31,6 +31,11 @@ func NewPlayer() *Player {
 }
 
 // Start spawns mpv in idle mode with an IPC socket. Idempotent.
+//
+// mpv's stderr is captured and forwarded to the logger with a [mpv] prefix.
+// This is the only way to see what mpv is actually doing when a loadfile
+// command is accepted but nothing plays — the IPC reply is "success" the
+// moment the URL is queued, not when audio starts.
 func (p *Player) Start() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -41,24 +46,46 @@ func (p *Player) Start() error {
 	// Remove stale socket from a previous run.
 	_ = os.Remove(socketPath)
 
+	// NOTE: deliberately NOT using --no-terminal or --really-quiet.
+	// Both suppress mpv's own message output, which we need for diagnosis.
+	// Under systemd, stderr goes to journalctl and there's no terminal
+	// to take over, so mpv's auto-detection behaves correctly.
 	cmd := exec.Command("mpv",
 		"--idle=yes",
 		"--no-video",
-		"--no-terminal",
-		"--really-quiet",
 		"--input-ipc-server="+socketPath,
 		"--volume=70",
 		"--audio-display=no",
 	)
+
+	// Capture stderr so mpv's diagnostics (yt-dlp errors, audio driver
+	// failures, codec issues) end up in our log instead of vanishing.
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("mpv stderr pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("mpv start: %w", err)
 	}
 	p.cmd = cmd
 
+	// Forward every line mpv writes to stderr.
+	go func() {
+		sc := bufio.NewScanner(stderr)
+		// Bump the buffer — yt-dlp sometimes prints long JSON lines.
+		sc.Buffer(make([]byte, 64*1024), 512*1024)
+		for sc.Scan() {
+			line := sc.Text()
+			if line == "" {
+				continue
+			}
+			log.Printf("[mpv] %s", line)
+		}
+	}()
+
 	// Wait for the socket to appear (mpv creates it asynchronously).
 	var conn net.Conn
-	var err error
 	for i := 0; i < 50; i++ {
 		conn, err = net.Dial("unix", socketPath)
 		if err == nil {
@@ -252,6 +279,8 @@ func (p *Player) GetString(prop string) (string, error) {
 	return s, nil
 }
 
+// ── Status ─────────────────────────────────────────────────
+
 // Status is the JSON shape the web UI polls.
 type Status struct {
 	Playing  bool    `json:"playing"`
@@ -287,9 +316,6 @@ func (p *Player) Status() Status {
 	}
 	if v, err := p.GetString("media-title"); err == nil {
 		s.Title = v
-	}
-	if v, err := p.GetString("metadata"); err == nil {
-		_ = v
 	}
 
 	s.Playing = !s.Idle && !s.Paused
