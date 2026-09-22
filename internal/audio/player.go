@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+// SpeakerDevice returns the aplay device to output to.
+// Override with SPEAKER_DEVICE=plughw:1,0 / hdmi:CARD=... / etc.
 func SpeakerDevice() string {
 	if d := os.Getenv("SPEAKER_DEVICE"); d != "" {
 		return d
@@ -19,6 +21,7 @@ func SpeakerDevice() string {
 	return "pulse"
 }
 
+// UDPStatus is a snapshot of the PC_AUDIO stream health, safe to serialise.
 type UDPStatus struct {
 	Listening    bool      `json:"listening"`
 	Connected    bool      `json:"connected"`
@@ -38,6 +41,7 @@ type AudioPlayer struct {
 	mu           sync.Mutex
 	udpListening bool
 
+	// telemetry, guarded by teleMu
 	teleMu       sync.Mutex
 	lastPacket   time.Time
 	packetsTotal uint64
@@ -51,12 +55,32 @@ func NewAudioPlayer() *AudioPlayer {
 	return &AudioPlayer{}
 }
 
+// aplayEnv builds the environment for a child aplay process.
+//
+// PULSE_LATENCY_MSEC caps the per-stream buffer PulseAudio allocates.
+// The default is 200-500 ms, which is pure latency for an interactive
+// stream. 20 ms is a good balance between responsiveness and tolerance
+// for scheduler jitter.
+//
+// PULSE_SINK pins the stream to the currently-selected default sink so
+// aplay doesn't race with sink changes — it attaches to the intended
+// device the moment it opens the connection, not on first write.
+func aplayEnv() []string {
+	env := os.Environ()
+	env = append(env, "PULSE_LATENCY_MSEC=20")
+	if sink := DefaultSinkName(); sink != "" {
+		env = append(env, "PULSE_SINK="+sink)
+	}
+	return env
+}
+
 func (ap *AudioPlayer) PlayWAV(wavData []byte) error {
 	ap.mu.Lock()
 	defer ap.mu.Unlock()
 
 	device := SpeakerDevice()
 	cmd := exec.Command("aplay", "-D", device, "-")
+	cmd.Env = aplayEnv()
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -69,12 +93,7 @@ func (ap *AudioPlayer) PlayWAV(wavData []byte) error {
 		return fmt.Errorf("aplay start error: %w", err)
 	}
 
-	pid := cmd.Process.Pid
-	registerAplay(pid)
-	go applyVolumeToPID(pid)
-
 	if _, err := stdin.Write(wavData); err != nil {
-		unregisterAplay(pid)
 		return fmt.Errorf("aplay write error: %w", err)
 	}
 	_ = stdin.Close()
@@ -86,16 +105,14 @@ func (ap *AudioPlayer) PlayWAV(wavData []byte) error {
 		stderrBuf = buf[:n]
 	}
 
-	err = cmd.Wait()
-	unregisterAplay(pid)
-
-	if err != nil {
+	if err := cmd.Wait(); err != nil {
 		return fmt.Errorf("aplay failed (device=%s): %w | stderr: %s",
 			device, err, string(stderrBuf))
 	}
 	return nil
 }
 
+// UDPStatus returns a thread-safe snapshot for the HTTP layer.
 func (ap *AudioPlayer) UDPStatus() UDPStatus {
 	q := ActiveQuality()
 
@@ -124,6 +141,10 @@ func (ap *AudioPlayer) UDPStatus() UDPStatus {
 	}
 }
 
+// StartUDPStreamListener binds to port, spawns aplay in the configured
+// format, and pumps received PCM to it. Blocks until stopChan is closed.
+//
+// Packet format: [8-byte LE nanosecond timestamp][raw PCM].
 func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}) {
 	ap.mu.Lock()
 	if ap.udpListening {
@@ -161,6 +182,14 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 		"-t", "raw", "-f", q.Format,
 		"-r", fmt.Sprintf("%d", q.SampleRate),
 		"-c", fmt.Sprintf("%d", q.Channels))
+	cmd.Env = aplayEnv()
+
+	if sink := DefaultSinkName(); sink != "" {
+		log.Printf("[AUDIO] aplay pinned to sink %q (20ms latency target)", sink)
+	} else {
+		log.Printf("[AUDIO] warning: no default sink resolved, aplay will use PulseAudio's choice")
+	}
+
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		log.Printf("[AUDIO] aplay stdin pipe failed: %v", err)
@@ -170,14 +199,8 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 		log.Printf("[AUDIO] aplay start failed: %v", err)
 		return
 	}
-	pid := cmd.Process.Pid
-	registerAplay(pid)
-	go applyVolumeToPID(pid)
-
 	log.Printf("[AUDIO] aplay playback started (pid=%d, device=%s, volume=%d%%)",
-		pid, SpeakerDevice(), Volume())
-
-	defer unregisterAplay(pid)
+		cmd.Process.Pid, SpeakerDevice(), Volume())
 
 	var (
 		packets       uint64
@@ -204,8 +227,7 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 
 		now := time.Now()
 
-		// ── Stats tick ──────────────────────────────────────
-		// Checked at the TOP of the loop so it fires during continuous
+		// Stats tick at the top of the loop so it fires during continuous
 		// traffic, not just on read timeouts. Emits every 5 seconds.
 		if packets > 0 && now.Sub(lastStat) >= 5*time.Second {
 			ap.recordStats(bytes, latencies, now.Sub(lastStat))
@@ -231,6 +253,10 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 			continue
 		}
 
+		// Format mismatch detection: each quality preset produces packets
+		// of a fixed size. If the incoming size doesn't match what we're
+		// expecting, the client hasn't caught up yet. Drop the packet so
+		// we don't feed wrong-format PCM to aplay.
 		expectedPCM := q.FramesPerPeriod() * q.Channels * q.BytesPerSmpl
 		expectedTotal := expectedPCM + 8
 
@@ -242,8 +268,7 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 					n, expectedTotal)
 			} else if mismatchCount%500 == 0 {
 				log.Printf("[AUDIO] still mismatched after %d packets — "+
-					"client hasn't detected the quality change",
-					mismatchCount)
+					"client hasn't detected the quality change", mismatchCount)
 			}
 			continue
 		}
@@ -277,6 +302,8 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 	}
 }
 
+// markPacket updates telemetry and logs a single transition line when
+// the client first connects (or reconnects after a gap).
 func (ap *AudioPlayer) markPacket(now time.Time) {
 	ap.teleMu.Lock()
 	wasConnected := ap.connected
@@ -292,6 +319,8 @@ func (ap *AudioPlayer) markPacket(now time.Time) {
 	}
 }
 
+// checkDisconnect emits a single log line when the client has been silent
+// for >3 seconds and we were previously connected.
 func (ap *AudioPlayer) checkDisconnect(now time.Time) {
 	ap.teleMu.Lock()
 	wasConnected := ap.connected
@@ -306,6 +335,7 @@ func (ap *AudioPlayer) checkDisconnect(now time.Time) {
 	}
 }
 
+// recordStats stores the latest 5s window for the HTTP layer.
 func (ap *AudioPlayer) recordStats(bytes uint64, latencies []time.Duration, window time.Duration) {
 	ap.teleMu.Lock()
 	defer ap.teleMu.Unlock()

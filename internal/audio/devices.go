@@ -11,10 +11,11 @@ type AudioDevice struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	IsDefault   bool   `json:"is_default"`
-	Kind        string `json:"kind"` // "sink" or "source"
+	Kind        string `json:"kind"`
+	State       string `json:"state,omitempty"`
+	Mute        bool   `json:"mute,omitempty"`
 }
 
-// ListSinks returns all output devices (speakers, headphones, HDMI).
 func ListSinks() ([]AudioDevice, error) {
 	out, err := exec.Command("pactl", "list", "sinks").Output()
 	if err != nil {
@@ -25,7 +26,6 @@ func ListSinks() ([]AudioDevice, error) {
 	return devs, nil
 }
 
-// ListSources returns all input devices (mics, monitors).
 func ListSources() ([]AudioDevice, error) {
 	out, err := exec.Command("pactl", "list", "sources").Output()
 	if err != nil {
@@ -61,6 +61,10 @@ func parsePactlDevices(out, kind string) []AudioDevice {
 			current.Name = strings.TrimSpace(strings.TrimPrefix(line, "Name:"))
 		case strings.HasPrefix(line, "Description:"):
 			current.Description = strings.TrimSpace(strings.TrimPrefix(line, "Description:"))
+		case strings.HasPrefix(line, "State:"):
+			current.State = strings.TrimSpace(strings.TrimPrefix(line, "State:"))
+		case strings.HasPrefix(line, "Mute:"):
+			current.Mute = strings.TrimSpace(strings.TrimPrefix(line, "Mute:")) == "yes"
 		}
 	}
 	if current != nil {
@@ -101,27 +105,47 @@ func getDefault(kind string) (string, error) {
 	return "", fmt.Errorf("no default %s found", kind)
 }
 
-// SetDefaultSink changes the default output and moves any currently
-// playing streams (mpv, aplay, etc.) to the new sink immediately.
-func SetDefaultSink(name string) error {
+// DefaultSinkName returns the currently active default sink's name, or
+// "" if we can't determine it. Used to pin child processes (aplay, mpv)
+// to a specific sink via PULSE_SINK.
+func DefaultSinkName() string {
+	name, err := getDefault("Sink")
+	if err != nil {
+		return ""
+	}
+	return name
+}
+
+// SetDefaultSink changes the default output, unmutes it, sets volume to
+// the given percentage (pass -1 to leave volume alone), and moves every
+// existing sink-input to the new sink.
+func SetDefaultSink(name string, volumePct int) error {
 	if err := exec.Command("pactl", "set-default-sink", name).Run(); err != nil {
 		return fmt.Errorf("set-default-sink: %w", err)
 	}
+
+	// Unmute — a muted master is a common cause of "everything is
+	// playing but I hear nothing".
+	_ = exec.Command("pactl", "set-sink-mute", name, "0").Run()
+
+	if volumePct > 0 {
+		_ = exec.Command("pactl", "set-sink-volume", name,
+			fmt.Sprintf("%d%%", volumePct)).Run()
+	}
+
 	moveAllSinkInputs(name)
 	return nil
 }
 
-// SetDefaultSource changes the default input. arecord running via
-// "pulse" will pick it up on the next process start.
 func SetDefaultSource(name string) error {
 	if err := exec.Command("pactl", "set-default-source", name).Run(); err != nil {
 		return fmt.Errorf("set-default-source: %w", err)
 	}
+	_ = exec.Command("pactl", "set-source-mute", name, "0").Run()
 	return nil
 }
 
-// moveAllSinkInputs relocates every playback stream to the given sink so
-// the change takes effect without restarting any processes.
+// moveAllSinkInputs relocates every playback stream to the given sink.
 func moveAllSinkInputs(sink string) {
 	out, err := exec.Command("pactl", "list", "sink-inputs", "short").Output()
 	if err != nil {

@@ -96,7 +96,14 @@ func (c *Capture) initDevice() error {
 	devCfg.Capture.Format = mf
 	devCfg.Capture.Channels = uint32(q.Channels)
 	devCfg.SampleRate = uint32(q.SampleRate)
-	devCfg.PeriodSizeInFrames = uint32(q.FramesPerPeriod())
+
+	// Halve the period to cut capture latency. At 48 kHz stereo this
+	// drops from 20 ms to 10 ms per period; with malgo's internal ring
+	// buffer (2-4 periods) that's 20-40 ms of capture latency total.
+	// If you hear stuttering on a loaded system, revert to
+	// q.FramesPerPeriod().
+	devCfg.PeriodSizeInFrames = uint32(q.FramesPerPeriod() / 2)
+
 	devCfg.Alsa.NoMMap = 1
 
 	// Important: the callback receiver here is *this* c, not a temporary.
@@ -116,7 +123,7 @@ func (c *Capture) initDevice() error {
 	log.Printf("[CLIENT] capture device: %s", c.info.Name)
 	log.Printf("[CLIENT] format: %s | %d Hz | %d ch | %s | %d kbps | %d frames/period (~%dms)",
 		q.Name, q.SampleRate, q.Channels, q.Format, q.Bandwidth(),
-		q.FramesPerPeriod(), q.FramesPerPeriod()*1000/q.SampleRate)
+		q.FramesPerPeriod()/2, (q.FramesPerPeriod()/2)*1000/q.SampleRate)
 	return nil
 }
 

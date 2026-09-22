@@ -3,7 +3,6 @@ package audio
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -23,8 +22,8 @@ func Volume() int {
 	return volumePercent
 }
 
-// SetVolume updates the target and applies it to any running aplay
-// streams. Returns the value actually stored.
+// SetVolume updates the target and applies it to every currently-running
+// aplay/mpv stream in PulseAudio. Returns the value actually stored.
 func SetVolume(pct int) int {
 	if pct < 0 {
 		pct = 0
@@ -36,50 +35,76 @@ func SetVolume(pct int) int {
 	volumePercent = pct
 	volumeMu.Unlock()
 
-	applyVolumeToAll()
+	applyToRunningStreams()
 	return pct
 }
 
-// applyVolumeToAll walks every currently-tracked aplay PID and sets its
-// PulseAudio sink-input volume.
-func applyVolumeToAll() {
-	for _, pid := range trackedAplayPids() {
-		applyVolumeToPID(pid)
+// applyToRunningStreams finds every aplay/mpv sink-input and sets its
+// volume to the current target. Called whenever SetVolume changes, so
+// playing streams update immediately without restarting.
+func applyToRunningStreams() {
+	out, err := exec.Command("pactl", "list", "sink-inputs").Output()
+	if err != nil {
+		return
+	}
+
+	pct := Volume()
+	targets := map[string]bool{
+		"aplay":                true,
+		"ALSA plug-in [aplay]": true,
+		"mpv":                  true,
+		"ALSA plug-in [mpv]":   true,
+	}
+
+	currentID := 0
+	sc := bufio.NewScanner(strings.NewReader(string(out)))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+
+		if strings.HasPrefix(line, "Sink Input #") {
+			if id, err := strconv.Atoi(strings.TrimPrefix(line, "Sink Input #")); err == nil {
+				currentID = id
+			}
+			continue
+		}
+
+		if strings.HasPrefix(line, "application.name = ") && currentID > 0 {
+			name := strings.Trim(strings.TrimPrefix(line, "application.name = "), `"`)
+			if targets[name] {
+				_ = exec.Command("pactl", "set-sink-input-volume",
+					strconv.Itoa(currentID),
+					fmt.Sprintf("%d%%", pct)).Run()
+			}
+		}
 	}
 }
 
-// applyVolumeToPID finds the pactl sink-input belonging to pid and sets
-// its volume. Retries briefly — PulseAudio can take ~50-300ms to register
-// a new stream after the process starts.
+// applyVolumeToPID is called from player.go right after spawning a new
+// aplay so it starts at the correct volume even if SetVolume hasn't been
+// called since it launched.
 func applyVolumeToPID(pid int) {
 	pct := Volume()
 	for i := 0; i < 8; i++ {
 		id, err := sinkInputForPID(pid)
 		if err == nil && id > 0 {
-			cmd := exec.Command("pactl", "set-sink-input-volume",
-				strconv.Itoa(id), fmt.Sprintf("%d%%", pct))
-			if err := cmd.Run(); err != nil {
-				log.Printf("[AUDIO] set-sink-input-volume(%d, %d%%) failed: %v", id, pct, err)
-			}
+			_ = exec.Command("pactl", "set-sink-input-volume",
+				strconv.Itoa(id), fmt.Sprintf("%d%%", pct)).Run()
 			return
 		}
 		time.Sleep(60 * time.Millisecond)
 	}
 }
 
-// sinkInputForPID parses `pactl list sink-inputs` and returns the sink
-// input ID whose application.process.id matches pid.
 func sinkInputForPID(pid int) (int, error) {
 	out, err := exec.Command("pactl", "list", "sink-inputs").Output()
 	if err != nil {
 		return 0, err
 	}
-
 	needle := fmt.Sprintf("application.process.id = \"%d\"", pid)
 	currentID := 0
 	sc := bufio.NewScanner(strings.NewReader(string(out)))
 	for sc.Scan() {
-		line := sc.Text()
+		line := strings.TrimSpace(sc.Text())
 		if strings.HasPrefix(line, "Sink Input #") {
 			if id, err := strconv.Atoi(strings.TrimPrefix(line, "Sink Input #")); err == nil {
 				currentID = id
@@ -90,34 +115,4 @@ func sinkInputForPID(pid int) (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("no sink-input for pid %d", pid)
-}
-
-// trackedAplayPids is a registry of aplay subprocesses we've spawned.
-// Every entry is registered by PlayWAV / StartUDPStreamListener and
-// deregistered when the process exits.
-var (
-	aplayMu   sync.Mutex
-	aplayPids = map[int]struct{}{}
-)
-
-func registerAplay(pid int) {
-	aplayMu.Lock()
-	aplayPids[pid] = struct{}{}
-	aplayMu.Unlock()
-}
-
-func unregisterAplay(pid int) {
-	aplayMu.Lock()
-	delete(aplayPids, pid)
-	aplayMu.Unlock()
-}
-
-func trackedAplayPids() []int {
-	aplayMu.Lock()
-	defer aplayMu.Unlock()
-	out := make([]int, 0, len(aplayPids))
-	for pid := range aplayPids {
-		out = append(out, pid)
-	}
-	return out
 }
