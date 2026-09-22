@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,11 +19,13 @@ import (
 const (
 	rearmQuietFrames = 10
 
-	// RMS below this is treated as silence. Once we see this many
-	// consecutive silent frames, we stop calling Detect() entirely until
-	// audio returns. This is the dominant CPU fix: the mel/embedding/
-	// classifier pipeline costs ~40% of one core while it runs, and it
-	// runs on every 80 ms frame by default.
+	// 0.7 is a conservative threshold. The library's own default is 0.9;
+	// 0.5 (which we shipped before) was too permissive and caused fires on
+	// unrelated speech. Patience requires sustained score, not just a spike.
+	defaultWakeThreshold = 0.70
+	defaultPatience      = 2
+
+	// Skip inference entirely during sustained silence.
 	defaultSilenceRMS    = 400.0
 	defaultSilenceFrames = 25 // 25 × 80 ms = 2 s
 )
@@ -31,7 +35,6 @@ type OpenWakeWordDetector struct {
 	engine   *oww.Engine
 	vad      *oww.VAD
 
-	threshold     float64
 	cooldown      time.Duration
 	silenceRMS    float64
 	silenceFrames int
@@ -68,11 +71,15 @@ func NewOpenWakeWordDetector(wakeWord, runtimePath, modelDir, wakeWordModel stri
 		return nil, fmt.Errorf("oww engine: %w", err)
 	}
 
+	threshold := float32(envFloat("WAKE_THRESHOLD", defaultWakeThreshold))
+	patience := envInt("WAKE_PATIENCE", defaultPatience)
+
 	if err := engine.AddModel(
 		modelDir+"/"+wakeWordModel,
 		oww.WithModelName(wakeWord),
-		oww.WithModelThreshold(0.5),
+		oww.WithModelThreshold(threshold),
 		oww.WithModelPredictionHistory(30),
+		oww.WithModelPatience(patience),
 	); err != nil {
 		return nil, fmt.Errorf("add wake model: %w", err)
 	}
@@ -80,14 +87,13 @@ func NewOpenWakeWordDetector(wakeWord, runtimePath, modelDir, wakeWordModel stri
 	silenceRMS := envFloat("WAKE_SILENCE_RMS", defaultSilenceRMS)
 	silenceFrames := envInt("WAKE_SILENCE_FRAMES", defaultSilenceFrames)
 
-	log.Printf("[WAKEWORD] openWakeWord loaded | model=%s | silence gate=%.0f rms / %d frames",
-		wakeWordModel, silenceRMS, silenceFrames)
+	log.Printf("[WAKEWORD] openWakeWord loaded | model=%s | threshold=%.2f | patience=%d | silence gate=%.0f rms / %d frames",
+		wakeWordModel, threshold, patience, silenceRMS, silenceFrames)
 
 	return &OpenWakeWordDetector{
 		wakeWord:      wakeWord,
 		engine:        engine,
 		vad:           vad,
-		threshold:     0.5,
 		cooldown:      1500 * time.Millisecond,
 		silenceRMS:    silenceRMS,
 		silenceFrames: silenceFrames,
@@ -101,7 +107,7 @@ func (d *OpenWakeWordDetector) Start(ctx context.Context, onDetected func()) err
 	d.active = true
 	d.mu.Unlock()
 
-	log.Printf("[WAKEWORD] openWakeWord detector active — say '%s'", d.wakeWord)
+	log.Printf("[WAKEWORD] detector active — say '%s'", d.wakeWord)
 	go d.loop(subCtx, onDetected)
 	return nil
 }
@@ -133,7 +139,7 @@ func (d *OpenWakeWordDetector) loop(ctx context.Context, onDetected func()) {
 			if meterOn {
 				fmt.Fprintln(os.Stdout)
 			}
-			log.Println("[WAKEWORD] openWakeWord loop stopped, mic closed.")
+			log.Println("[WAKEWORD] loop stopped, mic closed.")
 			return
 		default:
 			if err := stream.ReadFrame(intSamples); err != nil {
@@ -146,18 +152,17 @@ func (d *OpenWakeWordDetector) loop(ctx context.Context, onDetected func()) {
 				continue
 			}
 			readErrCount = 0
+
 			rms := audio.CalculateRMS(intSamples)
 			if meterOn {
 				renderMeter(dbfs(rms), rms >= d.silenceRMS)
 			}
 
-			// ── Silence gate ──────────────────────────────────────
-			// While sustained silence: skip Detect() entirely. The
-			// engine's internal state freezes, which saves ~40% of one
-			// core. When audio resumes we reset the engine so the
-			// classifier doesn't see stale mel features mixed with
-			// fresh audio — that discontinuity is what causes false
-			// fires on the first syllable of any speech.
+			// Silence gate: skip inference during sustained quiet.
+			// We deliberately do NOT reset the engine here — that would
+			// create a discontinuity when audio resumes, and the model
+			// scores erratically on a cold buffer. The engine's own
+			// history-length guard handles warm-up.
 			if rms < d.silenceRMS {
 				silentRun++
 				if silentRun >= d.silenceFrames {
@@ -171,11 +176,6 @@ func (d *OpenWakeWordDetector) loop(ctx context.Context, onDetected func()) {
 				if gated {
 					log.Printf("[WAKEWORD] silence gate released (rms=%.0f)", rms)
 					gated = false
-					// Flush stale pipeline state before feeding real
-					// audio. The engine's history guard (len < 5) then
-					// gives us ~400 ms of natural warm-up where no fire
-					// can happen while the mel/embedding buffer refills.
-					d.engine.Reset()
 				}
 				silentRun = 0
 			}
@@ -190,9 +190,7 @@ func (d *OpenWakeWordDetector) loop(ctx context.Context, onDetected func()) {
 				continue
 			}
 
-			hit := detections[d.wakeWord]
-
-			if hit {
+			if detections[d.wakeWord] {
 				quietFrames = 0
 				if !armed || time.Now().Before(cooldownUntil) {
 					continue
@@ -200,7 +198,7 @@ func (d *OpenWakeWordDetector) loop(ctx context.Context, onDetected func()) {
 				if meterOn {
 					fmt.Fprintln(os.Stdout)
 				}
-				log.Printf("[WAKEWORD] match: '%s' detected", d.wakeWord)
+				log.Printf("[WAKEWORD] match: '%s'", d.wakeWord)
 				armed = false
 				cooldownUntil = time.Now().Add(d.cooldown)
 				go onDetected()
@@ -239,8 +237,17 @@ func (d *OpenWakeWordDetector) Free() {
 	ort.DestroyEnvironment()
 }
 
-// envInt is local to this file. envFloat lives in vosk.go and is shared
-// package-wide — do not redeclare it here.
+// ── helpers ─────────────────────────────────────────────
+
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
+}
+
 func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
@@ -248,4 +255,31 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+func dbfs(rms float64) float64 {
+	if rms < 1 {
+		return -100
+	}
+	db := 20 * math.Log10(rms/32768.0)
+	if db < -100 {
+		return -100
+	}
+	return db
+}
+
+func renderMeter(db float64, speaking bool) {
+	level := int((db + 80) / 80 * 40)
+	if level < 0 {
+		level = 0
+	}
+	if level > 40 {
+		level = 40
+	}
+	bar := strings.Repeat("█", level) + strings.Repeat("·", 40-level)
+	marker := " "
+	if speaking {
+		marker = "●"
+	}
+	fmt.Fprintf(os.Stdout, "\r[MIC] %6.1f dBFS |%s| %s            ", db, bar, marker)
 }

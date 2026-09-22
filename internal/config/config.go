@@ -9,8 +9,6 @@ type Config struct {
 	HTTPPort     string
 	UDPAudioPort int
 	WakeWord     string
-	DetectorType string // "vosk" | "heuristic"
-	ModelPath    string // path to the vosk model directory
 }
 
 func Load() *Config {
@@ -18,23 +16,21 @@ func Load() *Config {
 		HTTPPort:     getEnv("HTTP_PORT", "8080"),
 		UDPAudioPort: getEnvAsInt("UDP_AUDIO_PORT", 4000),
 		WakeWord:     getEnv("WAKE_WORD", "nova"),
-		DetectorType: getEnv("DETECTOR_TYPE", "vosk"),
-		ModelPath:    getEnv("MODEL_PATH", "/opt/vosk-models/default"),
 	}
 }
 
-func getEnv(key, defaultVal string) string {
-	if val, ok := os.LookupEnv(key); ok {
-		return val
+func getEnv(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
 	}
-	return defaultVal
+	return def
 }
 
-func getEnvAsInt(key string, defaultVal int) int {
-	if val, ok := os.LookupEnv(key); ok {
-		if i, err := strconv.Atoi(val); err == nil {
+func getEnvAsInt(key string, def int) int {
+	if v, ok := os.LookupEnv(key); ok {
+		if i, err := strconv.Atoi(v); err == nil {
 			return i
 		}
 	}
-	return defaultVal
+	return def
 }

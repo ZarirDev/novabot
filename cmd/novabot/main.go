@@ -12,14 +12,13 @@ import (
 )
 
 func main() {
-	log.Println("Initializing Novabot audio service for Debian 13...")
+	log.Println("Initializing Novabot...")
 
 	cfg := config.Load()
 	player := audio.NewAudioPlayer()
-	detector := wakeword.NewDetector(cfg.DetectorType, cfg.WakeWord, cfg.ModelPath)
+	detector := wakeword.NewDetector(cfg.WakeWord)
 	manager := mode.NewManager(detector, player, cfg.UDPAudioPort)
 
-	// Set default mode
 	if err := manager.SetMode(mode.ModeAssistant); err != nil {
 		log.Fatalf("Failed to initialize mode: %v", err)
 	}
@@ -28,8 +27,8 @@ func main() {
 	mux := http.NewServeMux()
 	srv.RegisterRoutes(mux)
 
-	log.Printf("Novabot HTTP Control API listening on :%s", cfg.HTTPPort)
-	log.Printf("UDP Audio streaming port: %d", cfg.UDPAudioPort)
+	log.Printf("HTTP control API listening on :%s", cfg.HTTPPort)
+	log.Printf("UDP audio streaming port: %d", cfg.UDPAudioPort)
 
 	if err := http.ListenAndServe(":"+cfg.HTTPPort, mux); err != nil {
 		log.Fatalf("HTTP server failure: %v", err)

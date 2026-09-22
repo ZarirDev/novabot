@@ -35,3 +35,8 @@ go.work.sum
 
 .dev/
 novabot
+
+bin/
+runtime/
+models/*.onnx
+!models/hey_nova.onnx

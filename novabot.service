@@ -1,0 +1,19 @@
+[Unit]
+Description=Novabot voice assistant
+After=network.target sound.target
+Wants=sound.target
+
+[Service]
+Type=simple
+User=zarir
+WorkingDirectory=/opt/novabot
+EnvironmentFile=/opt/novabot/.env
+ExecStart=/opt/novabot/bin/novabot
+Restart=on-failure
+RestartSec=3
+SupplementaryGroups=audio
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
