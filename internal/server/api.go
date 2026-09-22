@@ -250,11 +250,11 @@ func (s *Server) handleAudioDevices(w http.ResponseWriter, r *http.Request) {
 		switch req.Kind {
 		case "sink":
 			if err := audio.SetDefaultSink(req.Name, 100); err != nil {
-				log.Printf("[AUDIO] default sink → %q (unmuted, volume 100%%)", req.Name)
+				log.Printf("[AUDIO] set default sink failed: %v", err)
 				http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 				return
 			}
-			log.Printf("[AUDIO] default sink → %q", req.Name)
+			log.Printf("[AUDIO] default sink → %q (unmuted, volume 100%%)", req.Name)
 
 		case "source":
 			if err := audio.SetDefaultSource(req.Name); err != nil {

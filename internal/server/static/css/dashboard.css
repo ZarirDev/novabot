@@ -1,0 +1,22 @@
+/* ── dashboard grid ────────────────────────────── */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+/* per-metric sparkline accent colors */
+.card[data-metric="mem"]  .spark { color: var(--assistant); }
+.card[data-metric="load"] .spark { color: var(--pc); }
+.card[data-metric="temp"] .spark { color: var(--bad); }
+
+@media (max-width: 1024px) {
+  .grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 760px) {
+  .grid { grid-template-columns: 1fr; }
+}
