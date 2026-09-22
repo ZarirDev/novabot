@@ -120,6 +120,7 @@ func (d *OpenWakeWordDetector) loop(ctx context.Context, onDetected func()) {
 	meterOn := os.Getenv("NOVABOT_AUDIO_METER") == "1"
 
 	armed := true
+	var readErrCount int
 	quietFrames := 0
 	var cooldownUntil time.Time
 
@@ -136,11 +137,15 @@ func (d *OpenWakeWordDetector) loop(ctx context.Context, onDetected func()) {
 			return
 		default:
 			if err := stream.ReadFrame(intSamples); err != nil {
-				log.Printf("[WAKEWORD] ReadFrame error: %v", err)
-				time.Sleep(100 * time.Millisecond)
+				readErrCount++
+				if readErrCount == 1 || readErrCount%200 == 0 {
+					log.Printf("[WAKEWORD] ReadFrame error (%d consecutive): %v",
+						readErrCount, err)
+				}
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
-
+			readErrCount = 0
 			rms := audio.CalculateRMS(intSamples)
 			if meterOn {
 				renderMeter(dbfs(rms), rms >= d.silenceRMS)

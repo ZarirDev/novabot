@@ -40,7 +40,16 @@ RUN go build -o novabot ./cmd/novabot
 FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    alsa-utils ca-certificates curl unzip mpv python3 python3-pip \
+    alsa-utils \
+    ca-certificates \
+    curl \
+    unzip \
+    mpv \
+    python3 \
+    python3-pip \
+    pulseaudio-utils \
+    libasound2-plugins \
+    libpulse0 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --break-system-packages --no-cache-dir yt-dlp

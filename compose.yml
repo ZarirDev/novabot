@@ -1,18 +1,20 @@
-version: '3.8'
-
 services:
   novabot:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local/novabot:latest
+    pull_policy: build
     container_name: novabot
     restart: unless-stopped
     network_mode: host
+    user: "1000:1000"
     devices:
       - "/dev/snd:/dev/snd"
     volumes:
-      # bind-mount the wake model so you can swap it without rebuilding
       - ./hey_nova.onnx:/opt/oww-models/hey_nova.onnx:ro
-      # lm-sensors host data for temperature readings
       - /sys/class/hwmon:/sys/class/hwmon:ro
+      - /run/user/1000/pulse:/run/user/1000/pulse
     environment:
       - HTTP_PORT=8080
       - UDP_AUDIO_PORT=4000
@@ -21,8 +23,15 @@ services:
       - WAKE_MODEL_FILE=hey_nova.onnx
       - MIC_DEVICE=pulse
       - SPEAKER_DEVICE=pulse
+      - AUDIO_QUALITY=standard
       - OMP_NUM_THREADS=1
       - WAKE_SILENCE_RMS=400
       - WAKE_SILENCE_FRAMES=25
-      - AUDIO_QUALITY=standard
+      - PULSE_SERVER=unix:/run/user/1000/pulse/native
+      - XDG_RUNTIME_DIR=/run/user/1000
     mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
