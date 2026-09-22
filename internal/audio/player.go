@@ -257,7 +257,7 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 		// of a fixed size. If the incoming size doesn't match what we're
 		// expecting, the client hasn't caught up yet. Drop the packet so
 		// we don't feed wrong-format PCM to aplay.
-		expectedPCM := q.FramesPerPeriod() * q.Channels * q.BytesPerSmpl
+		expectedPCM := q.PacketFrames() * q.Channels * q.BytesPerSmpl
 		expectedTotal := expectedPCM + 8
 
 		if n != expectedTotal {

@@ -91,3 +91,20 @@ func AllQualities() []Quality {
 		qualityPresets["studio"],
 	}
 }
+
+// PacketFrames returns the number of audio frames in one UDP packet.
+// Both client and server derive packet sizes from this, so changing
+// latency targets here propagates to both ends automatically.
+//
+// Currently targets 10 ms of audio per packet:
+//
+//	16 kHz  →   160 frames →   320 PCM bytes
+//	48 kHz  →   480 frames →  1920 PCM bytes
+//	96 kHz  →   960 frames →  3840 PCM bytes
+//
+// 10 ms balances latency (low) against per-packet overhead. Halving
+// to 5 ms trades latency for double the packet rate — usually a wash
+// on LAN, worse on WiFi.
+func (q Quality) PacketFrames() int {
+	return q.SampleRate / 100
+}

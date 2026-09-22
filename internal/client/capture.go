@@ -102,7 +102,7 @@ func (c *Capture) initDevice() error {
 	// buffer (2-4 periods) that's 20-40 ms of capture latency total.
 	// If you hear stuttering on a loaded system, revert to
 	// q.FramesPerPeriod().
-	devCfg.PeriodSizeInFrames = uint32(q.FramesPerPeriod() / 2)
+	devCfg.PeriodSizeInFrames = uint32(q.PacketFrames())
 
 	devCfg.Alsa.NoMMap = 1
 
@@ -123,7 +123,7 @@ func (c *Capture) initDevice() error {
 	log.Printf("[CLIENT] capture device: %s", c.info.Name)
 	log.Printf("[CLIENT] format: %s | %d Hz | %d ch | %s | %d kbps | %d frames/period (~%dms)",
 		q.Name, q.SampleRate, q.Channels, q.Format, q.Bandwidth(),
-		q.FramesPerPeriod()/2, (q.FramesPerPeriod()/2)*1000/q.SampleRate)
+		q.PacketFrames(), q.PacketFrames()*1000/q.SampleRate)
 	return nil
 }
 
