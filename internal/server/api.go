@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/ZarirDev/novabot/internal/audio"
 	"github.com/ZarirDev/novabot/internal/mode"
@@ -47,6 +48,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/audio/status", s.handleAudioStatus)
 	mux.HandleFunc("/api/v1/audio/quality", s.handleAudioQuality)
 	mux.HandleFunc("/api/v1/audio/volume", s.handleAudioVolume)
+	mux.HandleFunc("/api/v1/audio/devices", s.handleAudioDevices)
 	mux.HandleFunc("/api/v1/settings", s.handleSettings)
 
 	s.music.RegisterRoutes(mux)
@@ -221,4 +223,82 @@ func (s *Server) handleAudioVolume(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleAudioDevices(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+
+	switch r.Method {
+	case http.MethodGet:
+		s.writeDeviceList(w)
+
+	case http.MethodPost:
+		var req struct {
+			Kind string `json:"kind"` // "sink" or "source"
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+			return
+		}
+		if req.Name == "" {
+			http.Error(w, `{"error":"missing name"}`, http.StatusBadRequest)
+			return
+		}
+
+		switch req.Kind {
+		case "sink":
+			if err := audio.SetDefaultSink(req.Name); err != nil {
+				log.Printf("[AUDIO] set default sink failed: %v", err)
+				http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+				return
+			}
+			log.Printf("[AUDIO] default sink → %q", req.Name)
+
+		case "source":
+			if err := audio.SetDefaultSource(req.Name); err != nil {
+				log.Printf("[AUDIO] set default source failed: %v", err)
+				http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+				return
+			}
+			log.Printf("[AUDIO] default source → %q", req.Name)
+
+			// Restart arecord so it opens the new source. Do this in a
+			// goroutine so the HTTP response isn't blocked on detector
+			// shutdown.
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				if err := s.mgr.RestartDetector(); err != nil {
+					log.Printf("[AUDIO] detector restart after source change failed: %v", err)
+				}
+			}()
+
+		default:
+			http.Error(w, `{"error":"kind must be sink or source"}`, http.StatusBadRequest)
+			return
+		}
+
+		s.writeDeviceList(w)
+
+	default:
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) writeDeviceList(w http.ResponseWriter) {
+	sinks, sinkErr := audio.ListSinks()
+	sources, sourceErr := audio.ListSources()
+
+	resp := map[string]interface{}{
+		"sinks":   sinks,
+		"sources": sources,
+	}
+	if sinkErr != nil {
+		resp["sinks_error"] = sinkErr.Error()
+	}
+	if sourceErr != nil {
+		resp["sources_error"] = sourceErr.Error()
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }

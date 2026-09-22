@@ -914,3 +914,53 @@ html, body {
 @media (max-width: 760px) {
   .volume-control { min-width: 0; width: 100%; }
 }
+
+/* ── DEVICE SELECTORS ──────────────────────────── */
+
+.device-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 260px;
+  max-width: 360px;
+  flex-shrink: 0;
+}
+
+.device-control select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border-2);
+  border-radius: 3px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 150ms;
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-dim) 50%),
+    linear-gradient(135deg, var(--text-dim) 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) 50%,
+    calc(100% - 9px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+}
+.device-control select:hover { border-color: var(--text-dim); }
+.device-control select:focus { border-color: var(--accent); }
+
+.device-hint {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-mute);
+  letter-spacing: 0.02em;
+  min-height: 12px;
+}
+.device-hint.error { color: var(--bad); }
+
+@media (max-width: 760px) {
+  .device-control { min-width: 0; width: 100%; max-width: none; }
+}

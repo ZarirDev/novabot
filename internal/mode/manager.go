@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/ZarirDev/novabot/internal/audio"
 	"github.com/ZarirDev/novabot/internal/wakeword"
@@ -115,7 +116,6 @@ func (m *Manager) SetMode(newMode AppMode) error {
 		log.Println("[MODE] disabling wake-word detector, opening UDP stream")
 		m.detector.Stop()
 
-		// Same restart logic, just under the held lock.
 		if m.udpStopChan != nil {
 			close(m.udpStopChan)
 		}
@@ -142,23 +142,49 @@ func (m *Manager) SetMode(newMode AppMode) error {
 			m.udpDoneChan = nil
 		}
 
-		ctx := context.Background()
-		err := m.detector.Start(ctx, func() {
-			log.Println("[NOVABOT] Wake word detected! Playing confirmation ping...")
-			pingAudio := audio.GenerateTone(1000.0, 100, 16000)
-			if err := m.player.PlayWAV(pingAudio); err != nil {
-				log.Printf("[AUDIO] ping playback failed: %v", err)
-			}
-			ttsAudio := audio.GenerateTTSAudio(16000)
-			if err := m.player.PlayWAV(ttsAudio); err != nil {
-				log.Printf("[AUDIO] tts playback failed: %v", err)
-			}
-		})
-		if err != nil {
-			return fmt.Errorf("failed to restart wake word detector: %w", err)
+		if err := m.startDetectorLocked(); err != nil {
+			return err
 		}
 	}
 
 	m.currentMode = newMode
 	return nil
+}
+
+// RestartDetector stops and restarts the wake-word detector if we're in
+// ASSISTANT mode. Used after a mic source change so arecord reopens with
+// the new default.
+func (m *Manager) RestartDetector() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.currentMode != ModeAssistant {
+		return nil
+	}
+
+	log.Println("[MODE] restarting wake-word detector")
+	m.detector.Stop()
+	time.Sleep(150 * time.Millisecond)
+	return m.startDetectorLocked()
+}
+
+func (m *Manager) startDetectorLocked() error {
+	ctx := context.Background()
+	err := m.detector.Start(ctx, m.onWakeWord)
+	if err != nil {
+		return fmt.Errorf("failed to start wake word detector: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) onWakeWord() {
+	log.Println("[NOVABOT] Wake word detected! Playing confirmation ping...")
+	pingAudio := audio.GenerateTone(1000.0, 100, 16000)
+	if err := m.player.PlayWAV(pingAudio); err != nil {
+		log.Printf("[AUDIO] ping playback failed: %v", err)
+	}
+	ttsAudio := audio.GenerateTTSAudio(16000)
+	if err := m.player.PlayWAV(ttsAudio); err != nil {
+		log.Printf("[AUDIO] tts playback failed: %v", err)
+	}
 }

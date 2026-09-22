@@ -275,6 +275,34 @@
             </div>
           </div>
         </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">output device</div>
+            <div class="setting-desc">
+              Where the bot sends audio. Applies to PC audio stream, wake-word
+              pings, and the music player. Changes take effect immediately.
+            </div>
+          </div>
+          <div class="device-control">
+            <select id="device-sink"></select>
+            <span class="device-hint" id="sink-hint"></span>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">input device</div>
+            <div class="setting-desc">
+              Microphone used for wake-word detection. Changing this restarts
+              the detector.
+            </div>
+          </div>
+          <div class="device-control">
+            <select id="device-source"></select>
+            <span class="device-hint" id="source-hint"></span>
+          </div>
+        </div>
       </section>
 
     </div>
