@@ -259,6 +259,38 @@
             <span class="device-hint" id="source-hint"></span>
           </div>
         </div>
+        <section class="settings-group">
+          <h2 class="settings-title">logging</h2>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-label">audio stream stats</div>
+              <div class="setting-desc">
+                Emit a summary line every 5 seconds while PC audio is streaming
+                (kbps, packet count, latency). Turn off once the stream is
+                working to keep journalctl readable.
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="toggle-audio-stats">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-label">wake-word activity</div>
+              <div class="setting-desc">
+                Log silence gate transitions from the wake-word detector. Useful
+                when tuning the mic threshold, noisy once it's dialed in.
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="toggle-wakeword-log">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </section>
       </section>
     </div>
 

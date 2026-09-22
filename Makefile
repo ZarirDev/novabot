@@ -28,6 +28,7 @@ export WAKE_THRESHOLD       ?= 0.5
 export WAKE_PATIENCE        ?= 0
 export WAKE_SILENCE_RMS     ?= 400
 export WAKE_SILENCE_FRAMES  ?= 25
+export PULSE_LATENCY_MSEC ?= 100
 
 .PHONY: all setup build client run test vet clean install uninstall
 

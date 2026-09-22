@@ -26,4 +26,5 @@ setInterval(() => {
   loadQuality();
   loadVolume();
   loadDevices();
+  loadLogging();
 }, 3000);

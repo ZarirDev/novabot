@@ -21,7 +21,18 @@ func SpeakerDevice() string {
 	return "pulse"
 }
 
-// UDPStatus is a snapshot of the PC_AUDIO stream health, safe to serialise.
+// pulseLatencyMS returns the target PulseAudio stream buffer in
+// milliseconds. This is the single biggest lever for PC_AUDIO smoothness:
+// too small and network jitter causes underruns (audible stutters), too
+// large and you add pointless latency. 100 ms absorbs typical LAN jitter
+// with WiFi spikes up to ~80 ms; raise to 200 if you stream over bad WiFi.
+func pulseLatencyMS() string {
+	if v := os.Getenv("PULSE_LATENCY_MSEC"); v != "" {
+		return v
+	}
+	return "100"
+}
+
 type UDPStatus struct {
 	Listening    bool      `json:"listening"`
 	Connected    bool      `json:"connected"`
@@ -41,7 +52,6 @@ type AudioPlayer struct {
 	mu           sync.Mutex
 	udpListening bool
 
-	// telemetry, guarded by teleMu
 	teleMu       sync.Mutex
 	lastPacket   time.Time
 	packetsTotal uint64
@@ -58,16 +68,12 @@ func NewAudioPlayer() *AudioPlayer {
 // aplayEnv builds the environment for a child aplay process.
 //
 // PULSE_LATENCY_MSEC caps the per-stream buffer PulseAudio allocates.
-// The default is 200-500 ms, which is pure latency for an interactive
-// stream. 20 ms is a good balance between responsiveness and tolerance
-// for scheduler jitter.
-//
-// PULSE_SINK pins the stream to the currently-selected default sink so
-// aplay doesn't race with sink changes — it attaches to the intended
-// device the moment it opens the connection, not on first write.
+// PULSE_SINK pins the stream to the current default sink so aplay
+// attaches to the intended device the moment it opens the connection,
+// not on the first write.
 func aplayEnv() []string {
 	env := os.Environ()
-	env = append(env, "PULSE_LATENCY_MSEC=20")
+	env = append(env, "PULSE_LATENCY_MSEC="+pulseLatencyMS())
 	if sink := DefaultSinkName(); sink != "" {
 		env = append(env, "PULSE_SINK="+sink)
 	}
@@ -112,7 +118,6 @@ func (ap *AudioPlayer) PlayWAV(wavData []byte) error {
 	return nil
 }
 
-// UDPStatus returns a thread-safe snapshot for the HTTP layer.
 func (ap *AudioPlayer) UDPStatus() UDPStatus {
 	q := ActiveQuality()
 
@@ -143,8 +148,6 @@ func (ap *AudioPlayer) UDPStatus() UDPStatus {
 
 // StartUDPStreamListener binds to port, spawns aplay in the configured
 // format, and pumps received PCM to it. Blocks until stopChan is closed.
-//
-// Packet format: [8-byte LE nanosecond timestamp][raw PCM].
 func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}) {
 	ap.mu.Lock()
 	if ap.udpListening {
@@ -175,8 +178,14 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 	}
 	defer conn.Close()
 
-	log.Printf("[AUDIO] UDP listener bound on 0.0.0.0:%d (quality=%s, %d Hz, %d ch, %s, expected %d kbps)",
-		port, q.Name, q.SampleRate, q.Channels, q.Format, q.Bandwidth())
+	// Enlarge the kernel receive buffer so a brief stall in the writer
+	// doesn't drop packets. 4 MB holds ~1000 packets of standard quality
+	// — several seconds of audio — well above any real jitter we care
+	// about absorbing.
+	_ = conn.SetReadBuffer(4 << 20)
+
+	log.Printf("[AUDIO] UDP listener bound on 0.0.0.0:%d (quality=%s, %d Hz, %d ch, %s, expected %d kbps, pulse buffer %sms)",
+		port, q.Name, q.SampleRate, q.Channels, q.Format, q.Bandwidth(), pulseLatencyMS())
 
 	cmd := exec.Command("aplay", "-q", "-D", SpeakerDevice(),
 		"-t", "raw", "-f", q.Format,
@@ -185,9 +194,7 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 	cmd.Env = aplayEnv()
 
 	if sink := DefaultSinkName(); sink != "" {
-		log.Printf("[AUDIO] aplay pinned to sink %q (20ms latency target)", sink)
-	} else {
-		log.Printf("[AUDIO] warning: no default sink resolved, aplay will use PulseAudio's choice")
+		log.Printf("[AUDIO] aplay pinned to sink %q", sink)
 	}
 
 	stdin, err := cmd.StdinPipe()
@@ -210,13 +217,16 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 		latencies     []time.Duration
 	)
 
-	buf := make([]byte, 32*1024)
+	// 64 KB read buffer — comfortable for any quality preset's datagram.
+	buf := make([]byte, 64*1024)
 
 	for {
 		select {
 		case <-stopChan:
-			log.Printf("[AUDIO] UDP stream stopping — %d packets / %d bytes total",
-				packets, bytes)
+			if StatsLogEnabled() {
+				log.Printf("[AUDIO] UDP stream stopping — %d packets / %d bytes total",
+					packets, bytes)
+			}
 			_ = stdin.Close()
 			if cmd.Process != nil {
 				_ = cmd.Process.Kill()
@@ -227,9 +237,7 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 
 		now := time.Now()
 
-		// Stats tick at the top of the loop so it fires during continuous
-		// traffic, not just on read timeouts. Emits every 5 seconds.
-		if packets > 0 && now.Sub(lastStat) >= 5*time.Second {
+		if StatsLogEnabled() && packets > 0 && now.Sub(lastStat) >= 5*time.Second {
 			ap.recordStats(bytes, latencies, now.Sub(lastStat))
 			logRXStats(packets, bytes, latencies, now.Sub(lastStat))
 			lastStat = now
@@ -253,28 +261,21 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 			continue
 		}
 
-		// Format mismatch detection: each quality preset produces packets
-		// of a fixed size. If the incoming size doesn't match what we're
-		// expecting, the client hasn't caught up yet. Drop the packet so
-		// we don't feed wrong-format PCM to aplay.
 		expectedPCM := q.PacketFrames() * q.Channels * q.BytesPerSmpl
 		expectedTotal := expectedPCM + 8
 
 		if n != expectedTotal {
 			mismatchCount++
 			if mismatchCount == 1 {
-				log.Printf("[AUDIO] format mismatch: got %d-byte packet, expected %d — "+
-					"client is on a different quality, waiting for it to catch up",
+				log.Printf("[AUDIO] format mismatch: got %d bytes, expected %d — waiting for client to catch up",
 					n, expectedTotal)
 			} else if mismatchCount%500 == 0 {
-				log.Printf("[AUDIO] still mismatched after %d packets — "+
-					"client hasn't detected the quality change", mismatchCount)
+				log.Printf("[AUDIO] still mismatched after %d packets", mismatchCount)
 			}
 			continue
 		}
 		if mismatchCount > 0 {
-			log.Printf("[AUDIO] format recovered after %d dropped packets — resuming",
-				mismatchCount)
+			log.Printf("[AUDIO] format recovered after %d dropped packets", mismatchCount)
 			mismatchCount = 0
 		}
 
@@ -296,14 +297,15 @@ func (ap *AudioPlayer) StartUDPStreamListener(port int, stopChan <-chan struct{}
 			}
 		}
 
+		// Blocking write. When aplay's ring buffer is full this blocks
+		// for ~10 ms, which is exactly the natural realtime throttle we
+		// want. No additional pacing code needed.
 		if _, werr := stdin.Write(pcm); werr != nil {
 			log.Printf("[AUDIO] aplay write error: %v", werr)
 		}
 	}
 }
 
-// markPacket updates telemetry and logs a single transition line when
-// the client first connects (or reconnects after a gap).
 func (ap *AudioPlayer) markPacket(now time.Time) {
 	ap.teleMu.Lock()
 	wasConnected := ap.connected
@@ -319,8 +321,6 @@ func (ap *AudioPlayer) markPacket(now time.Time) {
 	}
 }
 
-// checkDisconnect emits a single log line when the client has been silent
-// for >3 seconds and we were previously connected.
 func (ap *AudioPlayer) checkDisconnect(now time.Time) {
 	ap.teleMu.Lock()
 	wasConnected := ap.connected
@@ -335,7 +335,6 @@ func (ap *AudioPlayer) checkDisconnect(now time.Time) {
 	}
 }
 
-// recordStats stores the latest 5s window for the HTTP layer.
 func (ap *AudioPlayer) recordStats(bytes uint64, latencies []time.Duration, window time.Duration) {
 	ap.teleMu.Lock()
 	defer ap.teleMu.Unlock()

@@ -254,6 +254,40 @@ function currentDefault(devices) {
   return d ? d.name : "";
 }
 
+async function loadLogging() {
+  try {
+    const r = await fetch("/api/v1/logging", { cache: "no-store" });
+    const data = await r.json();
+    const a = $("toggle-audio-stats");
+    if (a) a.checked = !!data.audio_stats;
+    const w = $("toggle-wakeword-log");
+    if (w) w.checked = !!data.wakeword;
+  } catch (err) {
+    console.error("[logging] load failed:", err);
+  }
+}
+
+async function saveLogging() {
+  const payload = {
+    audio_stats: $("toggle-audio-stats")?.checked,
+    wakeword:    $("toggle-wakeword-log")?.checked,
+  };
+  try {
+    const r = await fetch("/api/v1/logging", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json();
+    const a = $("toggle-audio-stats");
+    if (a) a.checked = !!data.audio_stats;
+    const w = $("toggle-wakeword-log");
+    if (w) w.checked = !!data.wakeword;
+  } catch (err) {
+    console.error("[logging] save failed:", err);
+  }
+}
+
 // ── event wiring ────────────────────────────────────────
 
 $("toggle-pc-audio")?.addEventListener("change", saveSettings);
@@ -268,3 +302,6 @@ $("volume-slider")?.addEventListener("input", e => {
 $("volume-slider")?.addEventListener("change", e => {
   saveVolume(parseInt(e.target.value, 10));
 });
+
+$("toggle-audio-stats")?.addEventListener("change", saveLogging);
+$("toggle-wakeword-log")?.addEventListener("change", saveLogging);

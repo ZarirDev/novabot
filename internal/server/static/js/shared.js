@@ -109,10 +109,11 @@ function route() {
   } else if (page === "music") {
     musicStatus();
   } else if (page === "settings") {
-    loadSettings();
-    loadQuality();
-    loadVolume();
-    loadDevices();
-    pollAudioStatus();
+      loadSettings();
+      loadQuality();
+      loadVolume();
+      loadDevices();
+      loadLogging();
+      pollAudioStatus();
   }
 }

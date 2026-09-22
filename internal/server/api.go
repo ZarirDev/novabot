@@ -47,6 +47,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/stats", s.handleStats)
 	mux.HandleFunc("/api/v1/audio/status", s.handleAudioStatus)
 	mux.HandleFunc("/api/v1/audio/quality", s.handleAudioQuality)
+	mux.HandleFunc("/api/v1/logging", s.handleLogging)
 	mux.HandleFunc("/api/v1/audio/volume", s.handleAudioVolume)
 	mux.HandleFunc("/api/v1/audio/devices", s.handleAudioDevices)
 	mux.HandleFunc("/api/v1/settings", s.handleSettings)
@@ -301,4 +302,42 @@ func (s *Server) writeDeviceList(w http.ResponseWriter) {
 		resp["sources_error"] = sourceErr.Error()
 	}
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleLogging(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+
+	switch r.Method {
+	case http.MethodGet:
+		_ = json.NewEncoder(w).Encode(map[string]bool{
+			"audio_stats": audio.StatsLogEnabled(),
+			"wakeword":    audio.WakewordLogEnabled(),
+		})
+
+	case http.MethodPost:
+		var req struct {
+			AudioStats *bool `json:"audio_stats"`
+			Wakeword   *bool `json:"wakeword"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+		if req.AudioStats != nil {
+			audio.SetStatsLog(*req.AudioStats)
+			log.Printf("[SETTINGS] audio stats log = %v", *req.AudioStats)
+		}
+		if req.Wakeword != nil {
+			audio.SetWakewordLog(*req.Wakeword)
+			log.Printf("[SETTINGS] wakeword log = %v", *req.Wakeword)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]bool{
+			"audio_stats": audio.StatsLogEnabled(),
+			"wakeword":    audio.WakewordLogEnabled(),
+		})
+
+	default:
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+	}
 }

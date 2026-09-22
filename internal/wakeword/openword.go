@@ -167,14 +167,18 @@ func (d *OpenWakeWordDetector) loop(ctx context.Context, onDetected func()) {
 				silentRun++
 				if silentRun >= d.silenceFrames {
 					if !gated {
-						log.Printf("[WAKEWORD] silence gate engaged (rms=%.0f)", rms)
+						if audio.WakewordLogEnabled() {
+							log.Printf("[WAKEWORD] silence gate engaged (rms=%.0f)", rms)
+						}
 						gated = true
 					}
 					continue
 				}
 			} else {
 				if gated {
-					log.Printf("[WAKEWORD] silence gate released (rms=%.0f)", rms)
+					if audio.WakewordLogEnabled() {
+						log.Printf("[WAKEWORD] silence gate released (rms=%.0f)", rms)
+					}
 					gated = false
 				}
 				silentRun = 0
