@@ -29,6 +29,7 @@ func (m *MusicServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/music/prev", m.handlePrev)
 	mux.HandleFunc("/api/v1/music/seek", m.handleSeek)
 	mux.HandleFunc("/api/v1/music/volume", m.handleVolume)
+	mux.HandleFunc("/api/v1/music/debug", m.handleDebug)
 	mux.HandleFunc("/api/v1/music/status", m.handleStatus)
 	mux.HandleFunc("/api/v1/music/stop", m.handleStop)
 }
@@ -157,4 +158,19 @@ func (m *MusicServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(m.player.Status())
+}
+
+func (m *MusicServer) handleDebug(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+
+	state := m.player.DebugState()
+
+	// Also log it so it lands in journalctl even without the browser.
+	log.Printf("[MUSIC] debug state:")
+	for k, v := range state {
+		log.Printf("[MUSIC]   %s = %v", k, v)
+	}
+
+	_ = json.NewEncoder(w).Encode(state)
 }

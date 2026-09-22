@@ -8,6 +8,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,8 +17,6 @@ import (
 const socketPath = "/tmp/novabot-mpv.sock"
 
 // Player wraps a single mpv subprocess controlled via JSON IPC.
-// Minimal by design: request/response only, no event listener.
-// The web UI polls Status() once a second, which is plenty for a music player.
 type Player struct {
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -31,11 +31,6 @@ func NewPlayer() *Player {
 }
 
 // Start spawns mpv in idle mode with an IPC socket. Idempotent.
-//
-// mpv's stderr is captured and forwarded to the logger with a [mpv] prefix.
-// This is the only way to see what mpv is actually doing when a loadfile
-// command is accepted but nothing plays — the IPC reply is "success" the
-// moment the URL is queued, not when audio starts.
 func (p *Player) Start() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -43,13 +38,8 @@ func (p *Player) Start() error {
 		return nil
 	}
 
-	// Remove stale socket from a previous run.
 	_ = os.Remove(socketPath)
 
-	// NOTE: deliberately NOT using --no-terminal or --really-quiet.
-	// Both suppress mpv's own message output, which we need for diagnosis.
-	// Under systemd, stderr goes to journalctl and there's no terminal
-	// to take over, so mpv's auto-detection behaves correctly.
 	cmd := exec.Command("mpv",
 		"--idle=yes",
 		"--no-video",
@@ -58,11 +48,31 @@ func (p *Player) Start() error {
 		"--audio-display=no",
 	)
 
-	// Capture stderr so mpv's diagnostics (yt-dlp errors, audio driver
-	// failures, codec issues) end up in our log instead of vanishing.
+	// Log the environment mpv will inherit. This is the single most
+	// useful diagnostic when the binary works on dev but not on a
+	// systemd-managed server — the two environments differ.
+	env := cmd.Environ()
+	sort.Strings(env)
+	interesting := []string{"PATH", "HOME", "PULSE_SERVER", "PULSE_SINK",
+		"XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"}
+	log.Printf("[MUSIC] mpv environment:")
+	for _, kv := range env {
+		for _, key := range interesting {
+			if strings.HasPrefix(kv, key+"=") {
+				log.Printf("[MUSIC]   %s", kv)
+			}
+		}
+	}
+
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return fmt.Errorf("mpv stderr pipe: %w", err)
+	}
+
+	// Also capture stdout — mpv prints some diagnostics there.
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("mpv stdout pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -70,21 +80,10 @@ func (p *Player) Start() error {
 	}
 	p.cmd = cmd
 
-	// Forward every line mpv writes to stderr.
-	go func() {
-		sc := bufio.NewScanner(stderr)
-		// Bump the buffer — yt-dlp sometimes prints long JSON lines.
-		sc.Buffer(make([]byte, 64*1024), 512*1024)
-		for sc.Scan() {
-			line := sc.Text()
-			if line == "" {
-				continue
-			}
-			log.Printf("[mpv] %s", line)
-		}
-	}()
+	go forwardLines("mpv-out", stdout)
+	go forwardLines("mpv-err", stderr)
 
-	// Wait for the socket to appear (mpv creates it asynchronously).
+	// Wait for the socket.
 	var conn net.Conn
 	for i := 0; i < 50; i++ {
 		conn, err = net.Dial("unix", socketPath)
@@ -105,16 +104,62 @@ func (p *Player) Start() error {
 
 	log.Printf("[MUSIC] mpv started (pid=%d, socket=%s)", cmd.Process.Pid, socketPath)
 
-	// Reap the process when it exits so we don't leak zombies.
+	// Log mpv's version and audio driver detection once, at startup.
+	go p.logStartupInfo()
+
+	// Reap and log exit code.
 	go func() {
-		_ = cmd.Wait()
+		waitErr := cmd.Wait()
 		p.mu.Lock()
 		p.running = false
 		p.mu.Unlock()
-		log.Println("[MUSIC] mpv exited")
+		if waitErr != nil {
+			log.Printf("[MUSIC] mpv exited: %v", waitErr)
+		} else {
+			log.Println("[MUSIC] mpv exited cleanly")
+		}
 	}()
 
 	return nil
+}
+
+func forwardLines(tag string, r interface{ Read([]byte) (int, error) }) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		if line == "" {
+			continue
+		}
+		log.Printf("[%s] %s", tag, line)
+	}
+}
+
+// logStartupInfo queries mpv for version, audio device, and codec
+// support so we know exactly what binary is running and what it sees.
+func (p *Player) logStartupInfo() {
+	time.Sleep(500 * time.Millisecond)
+
+	if v, err := p.GetString("mpv-version"); err == nil {
+		log.Printf("[MUSIC] %s", v)
+	}
+	if v, err := p.GetString("audio-device"); err == nil {
+		log.Printf("[MUSIC] audio-device: %q", v)
+	}
+	if v, err := p.GetString("audio-codec"); err == nil && v != "" {
+		log.Printf("[MUSIC] audio-codec: %q", v)
+	}
+
+	// List available audio devices so we can see what mpv could pick.
+	if data, err := p.command("get_property", "audio-device-list"); err == nil {
+		var devices []map[string]interface{}
+		if json.Unmarshal(data, &devices) == nil {
+			log.Printf("[MUSIC] mpv audio-device-list (%d entries):", len(devices))
+			for _, d := range devices {
+				log.Printf("[MUSIC]   %v — %v", d["name"], d["description"])
+			}
+		}
+	}
 }
 
 // Stop kills mpv and cleans up.
@@ -133,8 +178,6 @@ func (p *Player) Stop() {
 	_ = os.Remove(socketPath)
 }
 
-// command sends a JSON command and returns the raw "data" field.
-// mpv replies with {"request_id":N,"error":"success","data":...}.
 func (p *Player) command(args ...interface{}) (json.RawMessage, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -150,7 +193,6 @@ func (p *Player) command(args ...interface{}) (json.RawMessage, error) {
 		"command":    args,
 		"request_id": id,
 	}
-
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -161,7 +203,6 @@ func (p *Player) command(args ...interface{}) (json.RawMessage, error) {
 		return nil, fmt.Errorf("mpv write: %w", err)
 	}
 
-	// Read until we see our request_id (mpv may emit events interleaved).
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		_ = p.conn.SetReadDeadline(deadline)
@@ -176,10 +217,13 @@ func (p *Player) command(args ...interface{}) (json.RawMessage, error) {
 			Data      json.RawMessage `json:"data"`
 		}
 		if err := json.Unmarshal(line, &resp); err != nil {
-			continue // not a reply (event or malformed line)
+			// Not a reply — could be an event. Log it, then continue.
+			log.Printf("[MUSIC] mpv event: %s", strings.TrimSpace(string(line)))
+			continue
 		}
 		if resp.RequestID != id {
-			continue // reply to a different request
+			log.Printf("[MUSIC] mpv event (other req): %s", strings.TrimSpace(string(line)))
+			continue
 		}
 		if resp.Error != "success" {
 			return nil, fmt.Errorf("mpv error: %s", resp.Error)
@@ -191,9 +235,41 @@ func (p *Player) command(args ...interface{}) (json.RawMessage, error) {
 
 // ── Public commands ────────────────────────────────────────
 
+// Load queues a URL for playback and, after a short delay, logs mpv's
+// state so we can tell whether it actually started or silently failed.
 func (p *Player) Load(url string) error {
-	_, err := p.command("loadfile", url, "replace")
-	return err
+	if _, err := p.command("loadfile", url, "replace"); err != nil {
+		return err
+	}
+	go p.verifyLoad(url)
+	return nil
+}
+
+// verifyLoad waits for mpv to either start playing or drop back to idle,
+// then logs everything relevant.
+func (p *Player) verifyLoad(url string) {
+	for _, delay := range []time.Duration{1 * time.Second, 3 * time.Second, 6 * time.Second} {
+		time.Sleep(delay - time.Since(time.Now().Add(-delay))) // approximate
+	}
+
+	// Simpler: poll at three checkpoints.
+	for i, d := range []time.Duration{1, 2, 3} {
+		time.Sleep(time.Second)
+		idle, _ := p.GetBool("idle-active")
+		count, _ := p.GetFloat("playlist-count")
+		title, _ := p.GetString("media-title")
+		path, _ := p.GetString("path")
+
+		log.Printf("[MUSIC] verify[%d] after %ds: idle=%v playlist-count=%.0f title=%q path=%q",
+			i, d, idle, count, title, path)
+
+		if !idle && title != "" {
+			// We're playing something with a real title.
+			log.Printf("[MUSIC] verify: playback started successfully")
+			return
+		}
+	}
+	_ = url
 }
 
 func (p *Player) TogglePause() error {
@@ -279,9 +355,35 @@ func (p *Player) GetString(prop string) (string, error) {
 	return s, nil
 }
 
+// DebugState returns a full snapshot for the /api/v1/music/debug endpoint.
+func (p *Player) DebugState() map[string]interface{} {
+	out := make(map[string]interface{})
+	if !p.running {
+		out["running"] = false
+		return out
+	}
+	out["running"] = true
+
+	for _, prop := range []string{
+		"idle-active", "pause", "media-title", "path",
+		"playlist-count", "playlist-pos", "duration", "time-pos",
+		"volume", "mute", "audio-codec-name", "audio-device",
+		"audio-params", "audio-format", "audio-samplerate",
+		"audio-channels", "audio-out-detected-device",
+		"core-idle", "eof-reached",
+	} {
+		if data, err := p.command("get_property", prop); err == nil {
+			var v interface{}
+			if json.Unmarshal(data, &v) == nil {
+				out[prop] = v
+			}
+		}
+	}
+	return out
+}
+
 // ── Status ─────────────────────────────────────────────────
 
-// Status is the JSON shape the web UI polls.
 type Status struct {
 	Playing  bool    `json:"playing"`
 	Paused   bool    `json:"paused"`
@@ -320,7 +422,6 @@ func (p *Player) Status() Status {
 
 	s.Playing = !s.Idle && !s.Paused
 
-	// Metadata artist — mpv returns an object, so fetch separately.
 	if m, err := p.command("get_property", "metadata"); err == nil {
 		var meta map[string]interface{}
 		if json.Unmarshal(m, &meta) == nil {
