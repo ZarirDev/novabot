@@ -20,6 +20,7 @@ function route() {
     loadSettings();
     loadQuality();
     loadVolume();
+    loadDevices();
   }
 }
 
@@ -465,6 +466,91 @@ $("volume-slider")?.addEventListener("change", e => {
   saveVolume(parseInt(e.target.value, 10));
 });
 
+let devicesCache = { sinks: [], sources: [] };
+
+async function loadDevices() {
+  try {
+    const r = await fetch("/api/v1/audio/devices", { cache: "no-store" });
+    devicesCache = await r.json();
+    renderDevices();
+  } catch (err) {
+    console.error("[devices] load failed:", err);
+  }
+}
+
+function renderDevices() {
+  renderDeviceSelect("device-sink",   devicesCache.sinks,   "sink");
+  renderDeviceSelect("device-source", devicesCache.sources, "source");
+
+  const sh = $("sink-hint");
+  if (sh) {
+    if (devicesCache.sinks_error) {
+      sh.textContent = devicesCache.sinks_error;
+      sh.classList.add("error");
+    } else {
+      sh.textContent = "";
+      sh.classList.remove("error");
+    }
+  }
+  const soh = $("source-hint");
+  if (soh) {
+    if (devicesCache.sources_error) {
+      soh.textContent = devicesCache.sources_error;
+      soh.classList.add("error");
+    } else {
+      soh.textContent = "";
+      soh.classList.remove("error");
+    }
+  }
+}
+
+function renderDeviceSelect(id, devices, kind) {
+  const sel = $(id);
+  if (!sel || !devices) return;
+
+  // Don't rebuild the select if the user is actively choosing.
+  if (document.activeElement === sel) return;
+
+  // Only rebuild if the set of devices actually changed.
+  const newKey = devices.map(d => d.name).join("|");
+  if (sel.dataset.key === newKey && sel.dataset.default === currentDefault(devices)) {
+    return;
+  }
+  sel.dataset.key = newKey;
+  sel.dataset.default = currentDefault(devices);
+
+  sel.innerHTML = devices.length === 0
+    ? `<option value="">no devices found</option>`
+    : devices.map(d =>
+        `<option value="${escapeHTML(d.name)}" ${d.is_default ? "selected" : ""}>` +
+          `${escapeHTML(d.description || d.name)}` +
+        `</option>`
+      ).join("");
+
+  sel.onchange = async () => {
+    const name = sel.value;
+    console.log(`[devices] setting ${kind} to ${name}`);
+    try {
+      const r = await fetch("/api/v1/audio/devices", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind, name }),
+      });
+      if (!r.ok) {
+        console.error(`[devices] set ${kind} failed:`, await r.text());
+      }
+      await loadDevices();
+    } catch (err) {
+      console.error(`[devices] network error:`, err);
+    }
+  };
+}
+
+function currentDefault(devices) {
+  const d = devices.find(x => x.is_default);
+  return d ? d.name : "";
+}
+
 // ── event wiring ────────────────────────────────────────
 
 // search
@@ -527,11 +613,6 @@ setInterval(() => {
     loadSettings();
     loadQuality();
     loadVolume();
-  }
-}, 3000);
-setInterval(() => {
-  if (currentPage === "settings") {
-    loadSettings();
-    loadQuality();
+    loadDevices();
   }
 }, 3000);
