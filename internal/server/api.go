@@ -19,6 +19,7 @@ type Server struct {
 	mgr   *mode.Manager
 	stats *StatsCollector
 	music *MusicServer
+	wol   *WoLServer
 }
 
 type ModeRequest struct {
@@ -34,11 +35,19 @@ func NewServer(mgr *mode.Manager) *Server {
 	stats := NewStatsCollector()
 	stats.Start()
 
-	return &Server{
+	s := &Server{
 		mgr:   mgr,
 		stats: stats,
 		music: NewMusicServer(),
 	}
+
+	if w, err := NewWoLServer(DefaultWoLDevicesPath()); err != nil {
+		log.Printf("[WOL] init failed: %v", err)
+	} else {
+		s.wol = w
+	}
+
+	return s
 }
 
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
@@ -53,6 +62,10 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/settings", s.handleSettings)
 
 	s.music.RegisterRoutes(mux)
+
+	if s.wol != nil {
+		s.wol.RegisterRoutes(mux)
+	}
 
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
