@@ -306,9 +306,6 @@
             <h1>devices</h1>
             <p class="sub">wake-on-lan</p>
           </div>
-          <div class="head-right">
-            <button class="search-go" id="wol-scan">scan lan</button>
-          </div>
         </header>
 
         <section class="settings-group">
@@ -334,8 +331,19 @@
 
         <section class="settings-group">
           <h2 class="settings-title">known devices</h2>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-label">scan lan</div>
+              <div class="setting-desc">
+                Pings every host on the local subnet to populate the kernel
+                neighbour table, then reads back every MAC address it can see.
+                Takes a few seconds on a /24.
+              </div>
+            </div>
+            <button id="wol-scan" class="search-go">scan lan</button>
+          </div>
           <div class="results" id="wol-devices">
-            <div class="empty">no devices — try scanning, or add one manually below</div>
+            <div class="empty">no devices — hit scan, or add one below</div>
           </div>
         </section>
       </div>

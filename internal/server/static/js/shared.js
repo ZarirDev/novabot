@@ -2,7 +2,7 @@
 // Loaded first. Every other script in this app depends on the
 // symbols defined here being in the global script scope.
 
-const PAGES = ["dashboard", "music", "settings"];
+const PAGES = ["dashboard", "music", "settings", "devices"];
 let currentPage = "dashboard";
 
 // Alias for document.getElementById.
@@ -115,5 +115,7 @@ function route() {
       loadDevices();
       loadLogging();
       pollAudioStatus();
+  } else if (page === "devices") {
+    wolLoad();
   }
 }

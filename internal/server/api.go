@@ -65,6 +65,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 
 	if s.wol != nil {
 		s.wol.RegisterRoutes(mux)
+		log.Printf("[WOL] routes registered at /api/v1/wol/*")
 	}
 
 	sub, err := fs.Sub(staticFS, "static")
