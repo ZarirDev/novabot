@@ -59,7 +59,7 @@ var searchRoots = []string{"/boot", "/efi"}
 var menuentryRe = regexp.MustCompile(`^\s*menuentry\s+['"]([^'"]+)['"]`)
 
 // efibootmgr output line: `Boot0001* Windows Boot Manager`
-var efiBootRe = regexp.MustCompile(`^Boot([0-9A-Fa-f]{4})(\*?)\s+(.+?)\s*$`)
+var efiBootRe = regexp.MustCompile(`^Boot([0-9A-Fa-f]{4})(\*?)\s+(.*)$`)
 
 const installedBin = "/usr/local/bin/novabot-client"
 
@@ -182,10 +182,14 @@ func ScanDirect() *ScanResult {
 		r.SystemdBoot = true
 	}
 
-	// efibootmgr output — only useful on UEFI.
+	// efibootmgr output — only useful on UEFI. Ask for verbose output
+	// explicitly so we always get the same shape regardless of distro
+	// defaults, then let the parser strip the device path back off.
+	// Verbose output is the only reliable way to distinguish entries
+	// whose names collide (e.g. multiple "UEFI OS" entries).
 	if r.Firmware == "UEFI" {
 		if _, ok := r.Tools["efibootmgr"]; ok {
-			if out, err := exec.Command("efibootmgr").Output(); err == nil {
+			if out, err := exec.Command("efibootmgr", "-v").Output(); err == nil {
 				r.EFIOutput = string(out)
 			}
 		}
@@ -325,9 +329,10 @@ func listGRUBFromCache() []Entry {
 func parseEFIOutput(out string) []Entry {
 	var entries []Entry
 	sc := bufio.NewScanner(strings.NewReader(out))
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	current := ""
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
+		line := strings.TrimRight(sc.Text(), "\r\n")
 		if strings.HasPrefix(line, "BootCurrent:") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
@@ -340,15 +345,30 @@ func parseEFIOutput(out string) []Entry {
 			continue
 		}
 		id := strings.ToUpper(m[1])
-		label := strings.TrimSpace(m[3])
+		active := m[2] == "*"
+		label := m[3]
+
+		// efibootmgr sometimes prints the full EFI device path after
+		// the label, separated by a tab. Strip it. Also handles the
+		// rare case where the path leaks through without a tab but
+		// starts with \EFI\.
+		if i := strings.IndexByte(label, '\t'); i >= 0 {
+			label = label[:i]
+		}
+		if i := strings.Index(label, `\EFI\`); i >= 0 {
+			label = label[:i]
+		}
+		label = strings.TrimSpace(label)
+		if label == "" {
+			label = id
+		}
+
 		entries = append(entries, Entry{
 			ID:     id,
 			Title:  label,
 			Source: "efi",
-			Active: m[2] == "*",
-			// Mark the currently-booted entry so the UI can highlight
-			// it the same way it highlights the GRUB default.
-			Index: boolToInt(id == current),
+			Active: active,
+			Index:  boolToInt(id == current),
 		})
 	}
 	return entries
