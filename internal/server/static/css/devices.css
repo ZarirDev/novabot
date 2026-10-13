@@ -1,60 +1,149 @@
-/* ── devices page ──────────────────────────────── */
+/* ── section header with inline action ─────────── */
+.group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.group-head .settings-title { margin-bottom: 0; }
+
+.group-help {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.55;
+  margin: -6px 0 14px;
+}
+
+/* ── add-device form ───────────────────────────── */
 .wol-add {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
   flex: 1;
+  justify-content: flex-end;
 }
 .wol-add input {
-  background: transparent;
+  background: var(--bg);
   border: 1px solid var(--border-2);
   color: var(--text);
   padding: 8px 10px;
   font: inherit;
-  font-size: 13px;
-  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  border-radius: 3px;
   min-width: 150px;
 }
 .wol-add input:focus { border-color: var(--accent); outline: none; }
+.wol-add input::placeholder { color: var(--text-mute); }
 
+/* ── device rows ───────────────────────────────── */
 .wol-device {
   display: grid;
   grid-template-columns: 1fr auto auto;
   gap: 12px;
   align-items: center;
   padding: 14px 16px;
-  border-bottom: 1px solid var(--border-2);
+  border-bottom: 1px solid var(--border);
 }
 .wol-device:last-child { border-bottom: none; }
 .wol-device-info { min-width: 0; }
 .wol-device .name {
-  font-size: 14px;
+  font-family: var(--mono);
+  font-size: 13px;
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .wol-device .meta {
-  font-size: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
   color: var(--text-dim);
-  font-family: ui-monospace, SFMono-Regular, monospace;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.wol-device .meta .mac { color: var(--text-dim); }
+.wol-device .meta .ip  { color: var(--text-mute); }
+
+.wol-device button.wol-edit:hover:not(:disabled) {
+  color: var(--assistant);
+  border-color: var(--assistant);
+}
+
 .wol-device button {
   background: transparent;
   border: 1px solid var(--border-2);
   color: var(--text-dim);
-  border-radius: 4px;
+  border-radius: 3px;
   padding: 6px 12px;
-  font: inherit;
-  font-size: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   cursor: pointer;
+  transition: color 150ms, border-color 150ms;
+  white-space: nowrap;
 }
 .wol-device button:hover:not(:disabled) {
   color: var(--accent);
   border-color: var(--accent);
 }
-.wol-device button.wol-remove:hover {
+.wol-device button.wol-remove:hover:not(:disabled) {
   color: var(--bad);
   border-color: var(--bad);
 }
 .wol-device button:disabled { opacity: 0.6; cursor: default; }
+
+.wol-boot {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+  margin-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+.wol-boot label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+.wol-boot select {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 6px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  appearance: none;
+}
+.wol-boot select:focus { border-color: var(--accent); outline: none; }
+.wol-boot button {
+  background: transparent;
+  border: 1px solid var(--border-2);
+  color: var(--text-dim);
+  border-radius: 3px;
+  padding: 6px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.wol-boot button:hover:not(:disabled) {
+  color: var(--assistant);
+  border-color: var(--assistant);
+}
+.wol-device .meta .boot-count { color: var(--assistant); }
+
+.wol-device {
+  grid-template-columns: 1fr auto auto auto;
+}

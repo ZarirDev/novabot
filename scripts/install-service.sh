@@ -62,7 +62,14 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE.service"
 
+# Make sure the desktop user's runtime dir exists at boot, so PulseAudio
+# is up before the service starts. Without this the server would come up
+# deaf after a reboot until the user logs in.
+sudo loginctl enable-linger "$(id -un)" 2>/dev/null || \
+    echo "⚠  could not enable linger; run: sudo loginctl enable-linger $(id -un)"
+
 echo "✓ installed"
 echo "  start:   sudo systemctl start $SERVICE"
 echo "  status:  sudo systemctl status $SERVICE"
 echo "  logs:    sudo journalctl -u $SERVICE -f"
+echo "  update:  make update"

@@ -10,7 +10,14 @@ import (
 	"sync"
 )
 
-// Device is one WoL target.
+type BootEntry struct {
+	Index  int    `json:"index"`
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Source string `json:"source"`
+	Active bool   `json:"active,omitempty"`
+}
+
 type Device struct {
 	Name      string `json:"name"`
 	MAC       string `json:"mac"`
@@ -18,23 +25,25 @@ type Device struct {
 	Broadcast string `json:"broadcast,omitempty"`
 	Port      int    `json:"port,omitempty"`
 	Manual    bool   `json:"manual"`
+
+	// Boot-agent fields. Populated when a novabot-client on the same
+	// machine registers its GRUB entries with us.
+	BootAddr    string      `json:"boot_addr,omitempty"`  // http://ip:port
+	BootToken   string      `json:"boot_token,omitempty"` // shared secret
+	BootEntries []BootEntry `json:"boot_entries,omitempty"`
+	BootDefault string      `json:"boot_default,omitempty"`
 }
 
-// Store keeps two maps: manually added devices (persisted to disk) and
-// scanned devices (ephemeral, refreshed on every scan). Manual entries
-// always win in List/Get.
 type Store struct {
-	mu      sync.RWMutex
-	path    string
-	manual  map[string]Device
-	scanned map[string]Device
+	mu     sync.RWMutex
+	path   string
+	manual map[string]Device
 }
 
 func NewStore(path string) (*Store, error) {
 	s := &Store{
-		path:    path,
-		manual:  make(map[string]Device),
-		scanned: make(map[string]Device),
+		path:   path,
+		manual: make(map[string]Device),
 	}
 	if err := s.load(); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -78,21 +87,11 @@ func (s *Store) save() error {
 	return os.WriteFile(s.path, data, 0o644)
 }
 
-// List returns manual + scanned, manual taking precedence.
 func (s *Store) List() []Device {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	out := make([]Device, 0, len(s.manual)+len(s.scanned))
-	seen := make(map[string]struct{}, len(s.manual))
-	for k, d := range s.manual {
-		out = append(out, d)
-		seen[k] = struct{}{}
-	}
-	for k, d := range s.scanned {
-		if _, ok := seen[k]; ok {
-			continue
-		}
+	out := make([]Device, 0, len(s.manual))
+	for _, d := range s.manual {
 		out = append(out, d)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -101,7 +100,6 @@ func (s *Store) List() []Device {
 	return out
 }
 
-// Add inserts or replaces a manual device and persists.
 func (s *Store) Add(d Device) error {
 	hw, err := ParseMAC(d.MAC)
 	if err != nil {
@@ -113,53 +111,44 @@ func (s *Store) Add(d Device) error {
 		d.Port = 9
 	}
 	if d.Name == "" {
+		d.Name = d.IP
+	}
+	if d.Name == "" {
 		d.Name = d.MAC
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Preserve existing boot info across manual edits that don't
+	// include it — the boot registration path sets it explicitly.
+	existing, hadExisting := s.manual[normalizeMAC(d.MAC)]
+	if hadExisting {
+		if d.BootAddr == "" {
+			d.BootAddr = existing.BootAddr
+		}
+		if d.BootToken == "" {
+			d.BootToken = existing.BootToken
+		}
+		if len(d.BootEntries) == 0 {
+			d.BootEntries = existing.BootEntries
+		}
+		if d.BootDefault == "" {
+			d.BootDefault = existing.BootDefault
+		}
+	}
 	s.manual[normalizeMAC(d.MAC)] = d
 	return s.save()
 }
 
-// Remove deletes a manual entry (and hides the scanned entry so it
-// doesn't reappear until the next scan).
 func (s *Store) Remove(mac string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := normalizeMAC(mac)
-	delete(s.manual, key)
-	delete(s.scanned, key)
+	delete(s.manual, normalizeMAC(mac))
 	return s.save()
 }
 
 func (s *Store) Get(mac string) (Device, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	key := normalizeMAC(mac)
-	if d, ok := s.manual[key]; ok {
-		return d, true
-	}
-	d, ok := s.scanned[key]
+	d, ok := s.manual[normalizeMAC(mac)]
 	return d, ok
-}
-
-// Merge replaces the scanned set with the latest discovery results.
-// Manual entries are never overwritten.
-func (s *Store) Merge(scanned []Device) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	next := make(map[string]Device, len(scanned))
-	for _, d := range scanned {
-		if d.MAC == "" {
-			continue
-		}
-		if d.Port == 0 {
-			d.Port = 9
-		}
-		if d.Name == "" {
-			d.Name = d.IP
-		}
-		next[normalizeMAC(d.MAC)] = d
-	}
-	s.scanned = next
 }

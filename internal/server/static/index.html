@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>novabot</title>
-
 <link rel="stylesheet" href="/css/base.css">
 <link rel="stylesheet" href="/css/components.css">
 <link rel="stylesheet" href="/css/dashboard.css">
@@ -299,56 +298,61 @@
       </section>
     </div>
 
-    <!-- ═══ WoL ════════════════════════════════ -->
-     <div id="page-devices" class="page hidden">
-        <header class="head">
-          <div>
-            <h1>devices</h1>
-            <p class="sub">wake-on-lan</p>
-          </div>
-        </header>
+    <!-- ═══ DEVICES ═════════════════════════════════ -->
+    <div id="page-devices" class="page hidden">
+      <header class="head">
+        <div>
+          <h1>devices</h1>
+          <p class="sub">wake-on-lan</p>
+        </div>
+      </header>
 
-        <section class="settings-group">
-          <h2 class="settings-title">add device manually</h2>
-          <div class="setting-row">
-            <div class="setting-info">
-              <div class="setting-label">new device</div>
-              <div class="setting-desc">
-                Add a target by name even if it isn't discoverable by scanning.
-                Broadcast is optional — leave empty to send to both the global
-                broadcast and the device's subnet broadcast.
-              </div>
-            </div>
-            <div class="wol-add">
-              <input type="text" id="wol-add-name"  placeholder="name (e.g. desktop)">
-              <input type="text" id="wol-add-mac"   placeholder="aa:bb:cc:dd:ee:ff">
-              <input type="text" id="wol-add-ip"    placeholder="ip (optional)">
-              <input type="text" id="wol-add-bcast" placeholder="broadcast (optional)">
-              <button id="wol-add-btn" class="search-go">add</button>
-            </div>
-          </div>
-        </section>
+      <!-- saved devices -->
+      <section class="settings-group">
+        <h2 class="settings-title">saved devices</h2>
+        <div class="results" id="wol-saved">
+          <div class="empty">no saved devices — scan or add one below</div>
+        </div>
+      </section>
 
-        <section class="settings-group">
-          <h2 class="settings-title">known devices</h2>
-          <div class="setting-row">
-            <div class="setting-info">
-              <div class="setting-label">scan lan</div>
-              <div class="setting-desc">
-                Pings every host on the local subnet to populate the kernel
-                neighbour table, then reads back every MAC address it can see.
-                Takes a few seconds on a /24.
-              </div>
+      <!-- manual add / edit -->
+      <section class="settings-group">
+        <h2 class="settings-title" id="wol-form-title">add device manually</h2>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">new device</div>
+            <div class="setting-desc">
+              Give the device a hostname, paste its MAC address, and
+              optionally add a LAN IP so the magic packet also hits the
+              subnet broadcast on that interface.
             </div>
-            <button id="wol-scan" class="search-go">scan lan</button>
           </div>
-          <div class="results" id="wol-devices">
-            <div class="empty">no devices — hit scan, or add one below</div>
+          <div class="wol-add">
+            <input type="text" id="wol-add-name" placeholder="hostname (e.g. desktop)">
+            <input type="text" id="wol-add-mac"  placeholder="aa:bb:cc:dd:ee:ff">
+            <input type="text" id="wol-add-ip"   placeholder="ip (optional)">
+            <button id="wol-add-btn" class="search-go" type="button">save</button>
+            <button id="wol-cancel-btn" class="search-go" type="button" style="display:none">cancel</button>
           </div>
-        </section>
-      </div>
-  </main>
-</div>
+        </div>
+      </section>
+
+      <!-- scan lan -->
+      <section class="settings-group">
+        <div class="group-head">
+          <h2 class="settings-title">scan lan</h2>
+          <button id="wol-scan" class="search-go" type="button">scan lan</button>
+        </div>
+        <p class="group-help">
+          Pings every host on the local subnet, then reads back the kernel
+          ARP table and resolves each hostname via reverse DNS. Results
+          are transient — save the ones you care about.
+        </p>
+        <div class="results" id="wol-found">
+          <div class="empty">no scan results yet</div>
+        </div>
+      </section>
+    </div>
 
 <script src="/js/shared.js"></script>
 <script src="/js/dashboard.js"></script>

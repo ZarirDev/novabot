@@ -15,7 +15,6 @@ import (
 
 var macRe = regexp.MustCompile(`(?i)^([0-9a-f]{2}:){5}[0-9a-f]{2}$`)
 
-// localSubnets returns IPv4 networks on up, non-loopback interfaces.
 func localSubnets() []*net.IPNet {
 	var nets []*net.IPNet
 	ifaces, err := net.Interfaces()
@@ -59,8 +58,6 @@ func pingOnce(ctx context.Context, host string) {
 	_ = exec.CommandContext(c, "ping", "-c", "1", "-W", "1", host).Run()
 }
 
-// pingSweep pings every host in n to populate the kernel ARP cache.
-// Refuses to run on networks larger than /16 or smaller than /30.
 func pingSweep(ctx context.Context, n *net.IPNet) {
 	ip := n.IP.To4()
 	if ip == nil {
@@ -75,7 +72,6 @@ func pingSweep(ctx context.Context, n *net.IPNet) {
 	if count <= 2 {
 		return
 	}
-
 	sem := make(chan struct{}, 128)
 	var wg sync.WaitGroup
 	for i := uint32(1); i < count-1; i++ {
@@ -96,7 +92,6 @@ func pingSweep(ctx context.Context, n *net.IPNet) {
 	wg.Wait()
 }
 
-// ReadARP parses the kernel's neighbour table.
 func ReadARP() []Device {
 	if data, err := os.ReadFile("/proc/net/arp"); err == nil {
 		if devs := parseProcNetARP(data); len(devs) > 0 {
@@ -156,8 +151,50 @@ func parseIPNeigh(out string) []Device {
 	return devs
 }
 
-// ScanLAN pings every host on each local subnet, then reads back the
-// resulting ARP table. Takes a few seconds on a /24.
+// resolveHostname attempts a reverse DNS lookup for ip. Returns the
+// first PTR name with any trailing dot trimmed, or "" on failure.
+// Bounded to 500ms per lookup so a slow resolver doesn't stall the
+// whole scan.
+func resolveHostname(ctx context.Context, ip string) string {
+	c, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	names, err := net.DefaultResolver.LookupAddr(c, ip)
+	if err != nil || len(names) == 0 {
+		return ""
+	}
+	return strings.TrimSuffix(names[0], ".")
+}
+
+// resolveHostnames fills in Device.Name for every entry, in parallel.
+// Devices whose PTR lookup fails keep their IP as the name. Set
+// WOL_RESOLVE_HOSTNAMES=0 to skip this step entirely.
+func resolveHostnames(ctx context.Context, devices []Device) {
+	if os.Getenv("WOL_RESOLVE_HOSTNAMES") == "0" {
+		return
+	}
+	sem := make(chan struct{}, 32)
+	var wg sync.WaitGroup
+	for i := range devices {
+		if devices[i].IP == "" {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(d *Device) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if h := resolveHostname(ctx, d.IP); h != "" {
+				d.Name = h
+			}
+		}(&devices[i])
+	}
+	wg.Wait()
+}
+
+// ScanLAN pings every host on each local subnet to populate the kernel
+// neighbour table, reads back the ARP cache, then resolves hostnames
+// for each discovered device. The result is transient — callers decide
+// whether to persist any of it.
 func ScanLAN(ctx context.Context) []Device {
 	var wg sync.WaitGroup
 	for _, n := range localSubnets() {
@@ -168,5 +205,8 @@ func ScanLAN(ctx context.Context) []Device {
 		}(n)
 	}
 	wg.Wait()
-	return ReadARP()
+
+	devices := ReadARP()
+	resolveHostnames(ctx, devices)
+	return devices
 }

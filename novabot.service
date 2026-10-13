@@ -6,12 +6,15 @@ Wants=sound.target
 [Service]
 Type=simple
 User=zarir
+Group=zarir
 WorkingDirectory=/opt/novabot
 EnvironmentFile=/opt/novabot/.env
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
 ExecStart=/opt/novabot/bin/novabot
 Restart=on-failure
 RestartSec=3
-SupplementaryGroups=audio
+SupplementaryGroups=audio video
 StandardOutput=journal
 StandardError=journal
 
