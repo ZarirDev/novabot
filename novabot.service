@@ -17,6 +17,7 @@ RestartSec=3
 SupplementaryGroups=audio video
 StandardOutput=journal
 StandardError=journal
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target

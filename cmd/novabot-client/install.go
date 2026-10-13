@@ -155,6 +155,20 @@ func cmdInstall(args []string) {
 }
 
 func startAndReport(timeout time.Duration) error {
+	// If a previous version of the binary is running and doesn't
+	// respond to SIGTERM, a normal `systemctl restart` would block
+	// for TimeoutStopSec. Force-kill it first so start returns fast.
+	if exec.Command("systemctl", "is-active", "--quiet", "novabot-client").Run() == nil {
+		_ = runCmd(5*time.Second, "systemctl", "kill",
+			"--signal=SIGKILL", "novabot-client")
+		// Give systemd a beat to reap the process and transition
+		// the unit out of "active".
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	_ = runCmd(5*time.Second, "systemctl", "reset-failed", "novabot-client")
+
+	// --no-block returns immediately; we poll is-active below.
 	if err := runCmd(5*time.Second, "systemctl", "start", "--no-block", "novabot-client"); err != nil {
 		return fmt.Errorf("start command failed: %w", err)
 	}
@@ -257,6 +271,8 @@ Environment=PULSE_SERVER=unix:/run/user/%d/pulse/native
 ExecStart=%s run --config %s
 Restart=on-failure
 RestartSec=3
+TimeoutStopSec=10
+KillMode=mixed
 StandardOutput=journal
 StandardError=journal
 

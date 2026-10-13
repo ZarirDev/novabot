@@ -1,55 +1,72 @@
 package bootserver
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/ZarirDev/novabot/internal/client/grub"
 )
 
-// Server exposes this machine's GRUB entries over HTTP so the novabot
-// server can list them and trigger a next-boot change.
 type Server struct {
 	addr  string
 	token string
+	srv   *http.Server
 }
 
 func New(addr, token string) *Server {
 	return &Server{addr: addr, token: token}
 }
 
-func (s *Server) Start() error {
+// Start blocks until ctx is cancelled, then shuts down gracefully.
+func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/boot", s.handleBoot)
 	mux.HandleFunc("/entries", s.handleEntries)
 	mux.HandleFunc("/health", s.handleHealth)
 
-	srv := &http.Server{
+	s.srv = &http.Server{
 		Addr:         s.addr,
 		Handler:      mux,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
 
-	// Log the reachable address(es) so the user knows what to expect.
 	if ip := outboundIP(); ip != "" {
 		host, port, _ := net.SplitHostPort(s.addr)
 		if host == "" || host == "0.0.0.0" || host == "::" {
-			log.Printf("[BOOTAGENT] listening on %s — reachable at http://%s:%s",
+			log.Printf("[BOOT] listening on %s — reachable at http://%s:%s",
 				s.addr, ip, port)
 		} else {
-			log.Printf("[BOOTAGENT] listening on %s", s.addr)
+			log.Printf("[BOOT] listening on %s", s.addr)
 		}
 	} else {
-		log.Printf("[BOOTAGENT] listening on %s", s.addr)
+		log.Printf("[BOOT] listening on %s", s.addr)
 	}
 
-	return srv.ListenAndServe()
+	// Graceful shutdown when the parent context is cancelled.
+	go func() {
+		<-ctx.Done()
+		log.Printf("[BOOT] context cancelled — shutting down http server")
+		sdCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := s.srv.Shutdown(sdCtx); err != nil {
+			log.Printf("[BOOT] shutdown error: %v", err)
+		}
+	}()
+
+	err := s.srv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 func (s *Server) auth(r *http.Request) bool {
@@ -58,11 +75,19 @@ func (s *Server) auth(r *http.Request) bool {
 	}
 	given := r.Header.Get("Authorization")
 	want := "Bearer " + s.token
-	return subtle.ConstantTimeCompare([]byte(given), []byte(want)) == 1
+	ok := subtle.ConstantTimeCompare([]byte(given), []byte(want)) == 1
+	if !ok {
+		log.Printf("[BOOT] auth rejected (got %d-char header, expected %d-char)",
+			len(given), len(want))
+	}
+	return ok
 }
 
 func (s *Server) handleBoot(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[BOOT] >>> POST /boot from %s", r.RemoteAddr)
+
 	if r.Method != http.MethodPost {
+		log.Printf("[BOOT] rejected: method %s", r.Method)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -71,32 +96,42 @@ func (s *Server) handleBoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	raw, _ := io.ReadAll(r.Body)
+	log.Printf("[BOOT] raw body: %s", string(raw))
+
 	var req struct {
 		ID     string `json:"id"`
 		Source string `json:"source"`
 		Title  string `json:"title"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(raw, &req); err != nil {
+		log.Printf("[BOOT] invalid json: %v", err)
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	log.Printf("[BOOT] parsed: id=%q source=%q title=%q", req.ID, req.Source, req.Title)
+
 	if req.Source == "" {
 		req.Source = "grub"
 		if req.ID == "" {
 			req.ID = req.Title
 		}
+		log.Printf("[BOOT] source missing — defaulting to grub, id=%q", req.ID)
 	}
 
-	if err := grub.SetEntry(grub.Entry{
+	entry := grub.Entry{
 		ID:     req.ID,
 		Title:  req.Title,
 		Source: req.Source,
-	}); err != nil {
-		log.Printf("[BOOTAGENT] set next failed: %v", err)
+	}
+	log.Printf("[BOOT] calling grub.SetEntry(%+v)", entry)
+
+	if err := grub.SetEntry(entry); err != nil {
+		log.Printf("[BOOT] SetEntry FAILED: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	log.Printf("[BOOTAGENT] next boot → %s (%s)", req.ID, req.Source)
+	log.Printf("[BOOT] SetEntry OK — next boot will use %s/%s", req.Source, req.ID)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
@@ -111,11 +146,7 @@ func (s *Server) handleEntries(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	entries, err := grub.List()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	entries := grub.ListAll()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"entries": entries,
@@ -125,18 +156,18 @@ func (s *Server) handleEntries(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status": "ok",
 		"host":   hostname(),
 	})
 }
 
 func hostname() string {
-	h, _ := net.LookupCNAME("localhost")
-	if h == "" {
+	h, err := os.Hostname()
+	if err != nil {
 		return "unknown"
 	}
-	return fmt.Sprint(h)
+	return h
 }
 
 func outboundIP() string {

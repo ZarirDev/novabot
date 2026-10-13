@@ -173,7 +173,8 @@ func cmdRun(args []string) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-sig
+		s := <-sig
+		log.Printf("[CLIENT] received %v — shutting down", s)
 		cancel()
 	}()
 
@@ -184,21 +185,23 @@ func cmdRun(args []string) {
 		go func() {
 			defer wg.Done()
 			srv := bootserver.New(cfg.BootListen, cfg.BootToken)
-			if err := srv.Start(); err != nil {
-				log.Printf("[BOOTAGENT] stopped: %v", err)
+			if err := srv.Start(ctx); err != nil {
+				log.Printf("[BOOT] server stopped: %v", err)
+			} else {
+				log.Printf("[BOOT] server stopped cleanly")
 			}
 		}()
 	} else {
-		log.Printf("[BOOTAGENT] disabled — GRUB not usable")
+		log.Printf("[BOOT] disabled — GRUB / efibootmgr not usable")
 	}
 
 	if err := runStream(ctx, cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "run: %v\n", err)
+		log.Printf("[CLIENT] streamer error: %v", err)
 		cancel()
-		wg.Wait()
-		os.Exit(1)
 	}
+
 	wg.Wait()
+	log.Printf("[CLIENT] all workers exited")
 }
 
 func runStream(ctx context.Context, cfg *clientcfg.Config) error {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -526,6 +527,7 @@ func SetNext(title string) error {
 
 // SetEntry dispatches based on Source.
 func SetEntry(e Entry) error {
+	log.Printf("[GRUB] SetEntry: source=%q id=%q title=%q", e.Source, e.ID, e.Title)
 	switch e.Source {
 	case "efi":
 		return setEFINext(e.ID)
@@ -540,26 +542,35 @@ func SetEntry(e Entry) error {
 	}
 }
 
-// ── EFI: set next ──────────────────────────────────────
+// ── EFI ────────────────────────────────────────────────
 
 func setEFINext(id string) error {
+	log.Printf("[GRUB] setEFINext(%q)", id)
 	if id == "" {
 		return errors.New("efi boot id is required")
 	}
 	if _, err := exec.LookPath("efibootmgr"); err != nil {
+		log.Printf("[GRUB] efibootmgr not in PATH")
 		return errors.New("efibootmgr not installed")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Direct first (works if we're root), then via sudo.
+	log.Printf("[GRUB] attempt 1: direct efibootmgr (we are uid=%d)", os.Geteuid())
 	if err := runEFIBootNext(ctx, id, false); err == nil {
+		log.Printf("[GRUB] direct efibootmgr succeeded")
 		return nil
+	} else {
+		log.Printf("[GRUB] direct efibootmgr failed: %v", err)
 	}
+
+	log.Printf("[GRUB] attempt 2: sudo -n efibootmgr")
 	if err := runEFIBootNext(ctx, id, true); err != nil {
+		log.Printf("[GRUB] sudo efibootmgr failed: %v", err)
 		return fmt.Errorf("efibootmgr --bootnext %s failed: %w", id, err)
 	}
+	log.Printf("[GRUB] sudo efibootmgr succeeded")
 	return nil
 }
 
@@ -571,15 +582,18 @@ func runEFIBootNext(ctx context.Context, id string, viaSudo bool) error {
 		cmd = exec.CommandContext(ctx, "efibootmgr", "--bootnext", id)
 	}
 	out, err := cmd.CombinedOutput()
+	log.Printf("[GRUB] efibootmgr (sudo=%v) → output: %q err=%v",
+		viaSudo, strings.TrimSpace(string(out)), err)
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// ── GRUB: set next ─────────────────────────────────────
+// ── GRUB ───────────────────────────────────────────────
 
 func setGRUBNext(title string) error {
+	log.Printf("[GRUB] setGRUBNext(%q)", title)
 	if title == "" {
 		return errors.New("title is required")
 	}
@@ -588,28 +602,38 @@ func setGRUBNext(title string) error {
 
 	var lastErr error
 
+	log.Printf("[GRUB] attempt: grub-reboot direct")
 	if err := tryReboot(ctx, title, false); err == nil {
 		return nil
 	} else {
 		lastErr = err
+		log.Printf("[GRUB] grub-reboot direct failed: %v", err)
 	}
+
+	log.Printf("[GRUB] attempt: sudo -n grub-reboot")
 	if err := tryReboot(ctx, title, true); err == nil {
 		return nil
 	} else {
 		lastErr = err
+		log.Printf("[GRUB] sudo grub-reboot failed: %v", err)
 	}
 
 	r, _ := loadScan()
 	if r != nil && r.GrubenvPath != "" {
+		log.Printf("[GRUB] attempt: grub-editenv direct on %s", r.GrubenvPath)
 		if err := tryEditEnv(ctx, r.GrubenvPath, title, false); err == nil {
 			return nil
 		} else {
 			lastErr = err
+			log.Printf("[GRUB] grub-editenv direct failed: %v", err)
 		}
+
+		log.Printf("[GRUB] attempt: sudo -n grub-editenv")
 		if err := tryEditEnv(ctx, r.GrubenvPath, title, true); err == nil {
 			return nil
 		} else {
 			lastErr = err
+			log.Printf("[GRUB] sudo grub-editenv failed: %v", err)
 		}
 	}
 
@@ -627,6 +651,8 @@ func tryReboot(ctx context.Context, title string, viaSudo bool) error {
 		cmd = exec.CommandContext(ctx, "grub-reboot", title)
 	}
 	out, err := cmd.CombinedOutput()
+	log.Printf("[GRUB] grub-reboot (sudo=%v) → output: %q err=%v",
+		viaSudo, strings.TrimSpace(string(out)), err)
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -646,6 +672,8 @@ func tryEditEnv(ctx context.Context, env, title string, viaSudo bool) error {
 			env, "set", "next_entry="+title)
 	}
 	out, err := cmd.CombinedOutput()
+	log.Printf("[GRUB] grub-editenv (sudo=%v) → output: %q err=%v",
+		viaSudo, strings.TrimSpace(string(out)), err)
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}

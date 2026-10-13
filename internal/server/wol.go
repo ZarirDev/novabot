@@ -195,15 +195,20 @@ func (s *WoLServer) handleBootNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mac := strings.TrimPrefix(r.URL.Path, "/api/v1/wol/boot/")
+	log.Printf("[WOL-BOOT] POST /boot/%s from %s", mac, r.RemoteAddr)
+
 	d, ok := s.store.Get(mac)
 	if !ok {
+		log.Printf("[WOL-BOOT] no device with mac %q", mac)
 		http.Error(w, "unknown device", http.StatusNotFound)
 		return
 	}
 	if d.BootAddr == "" {
+		log.Printf("[WOL-BOOT] device %q has no boot_addr — was it registered?", d.Name)
 		http.Error(w, "device has no boot agent registered", http.StatusBadRequest)
 		return
 	}
+	log.Printf("[WOL-BOOT] device %q → boot_addr=%s", d.Name, d.BootAddr)
 
 	var req struct {
 		ID     string `json:"id"`
@@ -211,33 +216,35 @@ func (s *WoLServer) handleBootNext(w http.ResponseWriter, r *http.Request) {
 		Title  string `json:"title"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("[WOL-BOOT] decode error: %v", err)
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	log.Printf("[WOL-BOOT] request: id=%q source=%q title=%q", req.ID, req.Source, req.Title)
+
 	if req.ID == "" && req.Title == "" {
 		http.Error(w, "id or title required", http.StatusBadRequest)
 		return
 	}
 	if req.Source == "" {
-		// Backwards compat: older UI sent just a title, meaning GRUB.
 		req.Source = "grub"
 		if req.ID == "" {
 			req.ID = req.Title
 		}
 	}
 
+	log.Printf("[WOL-BOOT] calling boot agent at %s", d.BootAddr)
 	if err := callBootAgent(d.BootAddr, d.BootToken, req.ID, req.Source, req.Title); err != nil {
-		log.Printf("[WOL] boot %q (%s) on %q failed: %v", req.Title, req.Source, d.Name, err)
+		log.Printf("[WOL-BOOT] agent call FAILED: %v", err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	log.Printf("[WOL] boot %q via %s on %q (%s) — next reboot",
-		req.Title, req.Source, d.Name, d.MAC)
+	log.Printf("[WOL-BOOT] agent accepted: %q via %s", req.ID, req.Source)
 
 	s.writeJSON(w, http.StatusOK, map[string]string{
 		"status": "ok",
 		"mac":    d.MAC,
-		"title":  req.Title,
+		"id":     req.ID,
 		"source": req.Source,
 	})
 }
@@ -248,8 +255,10 @@ func callBootAgent(addr, token, id, source, title string) error {
 		"source": source,
 		"title":  title,
 	})
-	req, err := http.NewRequest("POST", strings.TrimRight(addr, "/")+"/boot",
-		bytes.NewReader(body))
+	url := strings.TrimRight(addr, "/") + "/boot"
+	log.Printf("[WOL-BOOT] → POST %s body=%s", url, string(body))
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -257,15 +266,22 @@ func callBootAgent(addr, token, id, source, title string) error {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+
 	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("connect to %s: %w", url, err)
 	}
 	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	log.Printf("[WOL-BOOT] ← %d %s body=%q",
+		resp.StatusCode, http.StatusText(resp.StatusCode),
+		strings.TrimSpace(string(respBody)))
+
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("boot agent returned %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return fmt.Errorf("boot agent returned %d: %s",
+			resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 	return nil
 }
