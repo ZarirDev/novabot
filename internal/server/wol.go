@@ -48,6 +48,9 @@ func (s *WoLServer) writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func (s *WoLServer) handleDevices(w http.ResponseWriter, r *http.Request) {
@@ -154,7 +157,11 @@ func (s *WoLServer) handleBootRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "mac is required", http.StatusBadRequest)
 		return
 	}
-	d, exists := s.store.Get(reg.MAC)
+
+	prior, exists := s.store.Get(reg.MAC)
+	pendingBefore := exists && prior.PendingBoot != nil
+
+	d := prior
 	if !exists {
 		d = wol.Device{
 			Name: reg.Hostname,
@@ -173,22 +180,20 @@ func (s *WoLServer) handleBootRegister(w http.ResponseWriter, r *http.Request) {
 	d.BootToken = reg.BootToken
 	d.BootEntries = reg.Entries
 	d.BootDefault = reg.Default
-
-	// Preserve pending boot across re-registration.
-	existing, _ := s.store.Get(reg.MAC)
-	d.PendingBoot = existing.PendingBoot
+	// PendingBoot is untouched — the previous value carries through.
 
 	if err := s.store.Add(d); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	log.Printf("[WOL-REG] %q (%s) ip=%s bootAddr=%s entries=%d pending=%v",
-		d.Name, d.MAC, d.IP, d.BootAddr, len(reg.Entries), d.PendingBoot != nil)
+	after, _ := s.store.Get(reg.MAC)
+	log.Printf("[WOL-REG] %q mac=%s ip=%s bootAddr=%s entries=%d pending-before=%v pending-after=%v",
+		d.Name, d.MAC, d.IP, d.BootAddr, len(reg.Entries),
+		pendingBefore, after.PendingBoot != nil)
 	s.writeJSON(w, http.StatusOK, d)
 }
 
-// handleBootDispatch routes POST (set next boot) and DELETE (cancel
-// pending) on /api/v1/wol/boot/{mac}.
+// handleBootDispatch routes POST (queue/direct) and DELETE (cancel).
 func (s *WoLServer) handleBootDispatch(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
@@ -227,17 +232,17 @@ func (s *WoLServer) handleBootNext(w http.ResponseWriter, r *http.Request) {
 			req.ID = req.Title
 		}
 	}
-	log.Printf("[WOL-BOOT] device=%q ip=%s bootAddr=%s pending=%v",
+	log.Printf("[WOL-BOOT] device=%q ip=%s bootAddr=%q pending=%v",
 		d.Name, d.IP, d.BootAddr, d.PendingBoot != nil)
 	log.Printf("[WOL-BOOT] request id=%q source=%q title=%q",
 		req.ID, req.Source, req.Title)
 
-	// ── Default (wake-only) mode ──────────────────────────────
+	// ── Default (wake-only) ──────────────────────────────
 	isDefault := req.Source == "default" ||
 		req.ID == "default" ||
 		req.ID == "__default__"
 	if isDefault {
-		log.Printf("[WOL-BOOT] source=default → wake-only, no boot change")
+		log.Printf("[WOL-BOOT] mode=wake-only → sending WoL, no boot change")
 		if err := wol.SendToAll(d.MAC, d.IP, d.Broadcast, d.Port); err != nil {
 			log.Printf("[WOL-BOOT] wake-only WoL failed: %v", err)
 			http.Error(w, "wol send failed: "+err.Error(), http.StatusInternalServerError)
@@ -252,12 +257,11 @@ func (s *WoLServer) handleBootNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Direct path: agent reachable ─────────────────────────
+	// ── Direct if agent reachable ───────────────────────
 	if d.BootAddr != "" {
 		alive := agentAlive(d.BootAddr, 1500*time.Millisecond)
 		log.Printf("[WOL-BOOT] agent probe %s → alive=%v", d.BootAddr, alive)
 		if alive {
-			log.Printf("[WOL-BOOT] trying direct send")
 			if err := callBootAgent(d.BootAddr, d.BootToken, req.ID, req.Source, req.Title); err == nil {
 				log.Printf("[WOL-BOOT] direct send OK")
 				s.writeJSON(w, http.StatusOK, map[string]string{
@@ -269,16 +273,14 @@ func (s *WoLServer) handleBootNext(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			} else {
-				log.Printf("[WOL-BOOT] direct send failed: %v — falling back to WoL+queue", err)
+				log.Printf("[WOL-BOOT] direct send failed: %v — falling back", err)
 			}
 		}
 	} else {
-		log.Printf("[WOL-BOOT] no bootAddr on file — cannot direct send")
+		log.Printf("[WOL-BOOT] no bootAddr — cannot direct send")
 	}
 
-	// ── Deferred path: queue + WoL ───────────────────────────
-	log.Printf("[WOL-BOOT] queueing pending boot id=%s source=%s",
-		req.ID, req.Source)
+	// ── Queue + WoL ──────────────────────────────────────
 	d.PendingBoot = &wol.PendingBoot{
 		ID:     req.ID,
 		Source: req.Source,
@@ -286,19 +288,19 @@ func (s *WoLServer) handleBootNext(w http.ResponseWriter, r *http.Request) {
 		SetAt:  time.Now(),
 	}
 	if err := s.store.Add(d); err != nil {
-		log.Printf("[WOL-BOOT] save pending failed: %v", err)
+		log.Printf("[WOL-BOOT] save pending: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	log.Printf("[WOL-BOOT] pending boot saved")
+	log.Printf("[WOL-BOOT] queued pending id=%s source=%s title=%q",
+		req.ID, req.Source, req.Title)
 
-	log.Printf("[WOL-BOOT] sending WoL to %s", d.MAC)
 	if err := wol.SendToAll(d.MAC, d.IP, d.Broadcast, d.Port); err != nil {
 		log.Printf("[WOL-BOOT] WoL send failed: %v", err)
 		http.Error(w, "wol send failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	log.Printf("[WOL-BOOT] WoL sent, pending boot queued for checkin")
+	log.Printf("[WOL-BOOT] WoL sent to %s, waiting for client checkin", d.MAC)
 	s.writeJSON(w, http.StatusOK, map[string]string{
 		"status": "queued",
 		"mode":   "wol",
@@ -314,7 +316,6 @@ func (s *WoLServer) handleBootCancel(w http.ResponseWriter, r *http.Request) {
 
 	d, ok := s.store.Get(mac)
 	if !ok {
-		log.Printf("[WOL-BOOT] cancel: unknown device %q", mac)
 		http.Error(w, "unknown device", http.StatusNotFound)
 		return
 	}
@@ -329,11 +330,10 @@ func (s *WoLServer) handleBootCancel(w http.ResponseWriter, r *http.Request) {
 	was := d.PendingBoot
 	d.PendingBoot = nil
 	if err := s.store.Add(d); err != nil {
-		log.Printf("[WOL-BOOT] cancel: save failed: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	log.Printf("[WOL-BOOT] cancelled pending boot %s/%s for %q",
+	log.Printf("[WOL-BOOT] cancelled pending %s/%s for %q",
 		was.Source, was.ID, d.Name)
 	s.writeJSON(w, http.StatusOK, map[string]string{
 		"status": "cancelled",
@@ -342,8 +342,11 @@ func (s *WoLServer) handleBootCancel(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleBootCheckin: called by a client on startup. Asks "do you have a
-// pending boot for me?".
+// handleBootCheckin is called by a client on startup. It asks the
+// server: "I just booted, do you have a pending boot for me?".
+//
+// The pending boot is cleared AFTER the response is flushed, so a
+// lost response doesn't silently swallow the request.
 func (s *WoLServer) handleBootCheckin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -376,24 +379,21 @@ func (s *WoLServer) handleBootCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if time.Since(d.PendingBoot.SetAt) > 10*time.Minute {
-		log.Printf("[WOL-CHECKIN] %q pending boot expired (set %s ago)",
+		log.Printf("[WOL-CHECKIN] %q pending expired (set %s ago)",
 			d.Name, time.Since(d.PendingBoot.SetAt).Round(time.Second))
-		d.PendingBoot = nil
-		_ = s.store.Add(d)
+		// Don't clear yet — clear after response.
 		s.writeJSON(w, http.StatusOK, map[string]string{
 			"action": "none",
 			"reason": "expired",
 		})
+		d.PendingBoot = nil
+		_ = s.store.Add(d)
 		return
 	}
 
 	pb := d.PendingBoot
-	d.PendingBoot = nil
-	if err := s.store.Add(d); err != nil {
-		log.Printf("[WOL-CHECKIN] clear pending: %v", err)
-	}
-	log.Printf("[WOL-CHECKIN] delivering pending boot %s/%s to %q",
-		pb.Source, pb.ID, d.Name)
+	log.Printf("[WOL-CHECKIN] %q delivering pending %s/%s",
+		d.Name, pb.Source, pb.ID)
 
 	s.writeJSON(w, http.StatusOK, map[string]string{
 		"action": "set-and-reboot",
@@ -401,6 +401,14 @@ func (s *WoLServer) handleBootCheckin(w http.ResponseWriter, r *http.Request) {
 		"source": pb.Source,
 		"title":  pb.Title,
 	})
+
+	// Only clear after the response has been flushed.
+	d.PendingBoot = nil
+	if err := s.store.Add(d); err != nil {
+		log.Printf("[WOL-CHECKIN] clear pending: %v", err)
+	} else {
+		log.Printf("[WOL-CHECKIN] %q pending cleared", d.Name)
+	}
 }
 
 func agentAlive(addr string, timeout time.Duration) bool {

@@ -6,6 +6,15 @@ const wolState = {
   editing: null,
 };
 
+// lastRenderedKey caches a JSON snapshot of the devices array so we can
+// skip re-rendering (and thus destroying the user's <select> selection)
+// when nothing has actually changed.
+let wolLastKey = "";
+
+// pendingSelection caches each device's currently-selected dropdown
+// value so we can re-apply it after a re-render.
+const wolSelection = {};
+
 function wolWireButtons() {
   const scanBtn = document.getElementById("wol-scan");
   if (scanBtn && !scanBtn.dataset.wired) {
@@ -37,7 +46,15 @@ async function wolLoadSaved() {
       return;
     }
     const j = await r.json();
-    wolState.saved = j.devices || [];
+    const newDevices = j.devices || [];
+    const key = JSON.stringify(newDevices);
+    if (key === wolLastKey) {
+      // No change — leave the DOM alone. This is what keeps the user's
+      // dropdown selection from being clobbered every 3 seconds.
+      return;
+    }
+    wolLastKey = key;
+    wolState.saved = newDevices;
     wolRenderSaved();
   } catch (e) {
     console.error("[wol] load saved failed:", e);
@@ -53,11 +70,15 @@ function wolRenderSaved() {
     return;
   }
 
+  // Snapshot current dropdown selections before we blow the DOM away.
+  root.querySelectorAll(".wol-boot-select").forEach(sel => {
+    if (sel.value) wolSelection[sel.dataset.mac] = sel.value;
+  });
+
   root.innerHTML = wolState.saved.map(d => {
     const hasBoot = d.boot_entries && d.boot_entries.length > 0;
     const pending = d.pending_boot || null;
 
-    // Always offer a "Default (wake only)" option at the top.
     const defaultOpt =
       `<option value="__default__" data-source="default">default (wake only)</option>`;
     const bootOpts = hasBoot
@@ -101,6 +122,19 @@ function wolRenderSaved() {
     `;
   }).join("");
 
+  // Restore any selections the user had made before the re-render.
+  root.querySelectorAll(".wol-boot-select").forEach(sel => {
+    const prev = wolSelection[sel.dataset.mac];
+    if (prev) {
+      const opt = Array.from(sel.options).find(o => o.value === prev);
+      if (opt) sel.value = prev;
+    }
+    // Track live changes so we can preserve them next time.
+    sel.addEventListener("change", () => {
+      wolSelection[sel.dataset.mac] = sel.value;
+    });
+  });
+
   root.querySelectorAll(".wol-wake").forEach(b => {
     b.addEventListener("click", () => wolWake(b.dataset.mac, b));
   });
@@ -119,6 +153,7 @@ function wolRenderSaved() {
       const source = opt.dataset.source || "efi";
       const id = sel.value === "__default__" ? "default" : sel.value;
       const title = opt.textContent.trim();
+      console.log("[wol] go clicked", { mac, id, source, title });
       wolBootNext(mac, id, source, title, b);
     });
   });
@@ -148,7 +183,8 @@ async function wolBootNext(mac, id, source, title, btn) {
                 : "✓";
     btn.textContent = label;
     setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 1800);
-    // Refresh right away so the pending badge appears if we queued.
+    // Refresh so the pending badge shows up. wolLastKey won't match
+    // anymore because pending_boot was added, so this will re-render.
     setTimeout(wolLoadSaved, 400);
   } catch (e) {
     console.error("[wol] boot failed:", e);
@@ -168,6 +204,7 @@ async function wolCancelPending(mac, btn) {
       method: "DELETE",
     });
     if (!r.ok) throw new Error(await r.text());
+    wolLastKey = ""; // force a re-render
     await wolLoadSaved();
   } catch (e) {
     alert("cancel failed: " + e.message);
@@ -272,6 +309,7 @@ async function wolSaveFound(idx, btn) {
     if (!r.ok) throw new Error(await r.text());
     wolState.found.splice(idx, 1);
     wolRenderFound();
+    wolLastKey = ""; // force re-render of the saved list
     await wolLoadSaved();
   } catch (e) {
     alert("save failed: " + e.message);
@@ -302,6 +340,7 @@ async function wolRemove(mac) {
   if (wolState.editing && wolState.editing.toLowerCase() === mac.toLowerCase()) {
     wolCancelEdit();
   }
+  wolLastKey = "";
   await wolLoadSaved();
 }
 
@@ -331,6 +370,7 @@ async function wolAddManual() {
     return;
   }
   wolCancelEdit();
+  wolLastKey = "";
   await wolLoadSaved();
 }
 
