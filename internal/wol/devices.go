@@ -8,14 +8,26 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 type BootEntry struct {
-	Index  int    `json:"index"`
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	Source string `json:"source"`
-	Active bool   `json:"active,omitempty"`
+	Index   int    `json:"index"`
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Source  string `json:"source"`
+	Active  bool   `json:"active,omitempty"`
+	Current bool   `json:"current,omitempty"`
+}
+
+// PendingBoot is a boot target queued for a machine that isn't
+// currently reachable. Set when the user requests a boot-to-X on a
+// powered-off machine; consumed by the client's startup checkin.
+type PendingBoot struct {
+	ID     string    `json:"id"`
+	Source string    `json:"source"`
+	Title  string    `json:"title"`
+	SetAt  time.Time `json:"set_at"`
 }
 
 type Device struct {
@@ -26,12 +38,12 @@ type Device struct {
 	Port      int    `json:"port,omitempty"`
 	Manual    bool   `json:"manual"`
 
-	// Boot-agent fields. Populated when a novabot-client on the same
-	// machine registers its GRUB entries with us.
-	BootAddr    string      `json:"boot_addr,omitempty"`  // http://ip:port
-	BootToken   string      `json:"boot_token,omitempty"` // shared secret
+	BootAddr    string      `json:"boot_addr,omitempty"`
+	BootToken   string      `json:"boot_token,omitempty"`
 	BootEntries []BootEntry `json:"boot_entries,omitempty"`
 	BootDefault string      `json:"boot_default,omitempty"`
+
+	PendingBoot *PendingBoot `json:"pending_boot,omitempty"`
 }
 
 type Store struct {
@@ -118,10 +130,11 @@ func (s *Store) Add(d Device) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Preserve existing boot info across manual edits that don't
-	// include it — the boot registration path sets it explicitly.
+
 	existing, hadExisting := s.manual[normalizeMAC(d.MAC)]
 	if hadExisting {
+		// Preserve boot-registration and pending-boot info across
+		// edits that don't carry those fields.
 		if d.BootAddr == "" {
 			d.BootAddr = existing.BootAddr
 		}
@@ -134,6 +147,9 @@ func (s *Store) Add(d Device) error {
 		if d.BootDefault == "" {
 			d.BootDefault = existing.BootDefault
 		}
+		// PendingBoot is always caller-managed: nil means clear.
+		// (We don't preserve it — the caller explicitly nils it to
+		// clear, or sets it to queue.)
 	}
 	s.manual[normalizeMAC(d.MAC)] = d
 	return s.save()
@@ -151,4 +167,18 @@ func (s *Store) Get(mac string) (Device, bool) {
 	defer s.mu.RUnlock()
 	d, ok := s.manual[normalizeMAC(mac)]
 	return d, ok
+}
+
+// SetPendingBoot stores a pending boot for the given MAC.
+func (s *Store) SetPendingBoot(mac string, pb *PendingBoot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := normalizeMAC(mac)
+	d, ok := s.manual[key]
+	if !ok {
+		return errors.New("unknown device")
+	}
+	d.PendingBoot = pb
+	s.manual[key] = d
+	return s.save()
 }

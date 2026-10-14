@@ -105,7 +105,7 @@ func cmdInstall(args []string) {
 	// 5. sudoers
 	if err := writeSudoers(invoker); err != nil {
 		fmt.Printf("⚠  could not write sudoers rule: %v\n", err)
-		fmt.Printf("   GRUB control will require a password.\n")
+		fmt.Printf("   boot control will require a password.\n")
 	} else {
 		fmt.Printf("✓ wrote sudoers rule → %s\n", sudoersPath)
 	}
@@ -155,20 +155,6 @@ func cmdInstall(args []string) {
 }
 
 func startAndReport(timeout time.Duration) error {
-	// If a previous version of the binary is running and doesn't
-	// respond to SIGTERM, a normal `systemctl restart` would block
-	// for TimeoutStopSec. Force-kill it first so start returns fast.
-	if exec.Command("systemctl", "is-active", "--quiet", "novabot-client").Run() == nil {
-		_ = runCmd(5*time.Second, "systemctl", "kill",
-			"--signal=SIGKILL", "novabot-client")
-		// Give systemd a beat to reap the process and transition
-		// the unit out of "active".
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	_ = runCmd(5*time.Second, "systemctl", "reset-failed", "novabot-client")
-
-	// --no-block returns immediately; we poll is-active below.
 	if err := runCmd(5*time.Second, "systemctl", "start", "--no-block", "novabot-client"); err != nil {
 		return fmt.Errorf("start command failed: %w", err)
 	}
@@ -272,7 +258,6 @@ ExecStart=%s run --config %s
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=10
-KillMode=mixed
 StandardOutput=journal
 StandardError=journal
 
@@ -283,10 +268,6 @@ WantedBy=multi-user.target
 	return os.WriteFile(unitPath, []byte(unit), 0o644)
 }
 
-// writeSudoers grants the invoking user permission to run the specific
-// root-only operations the client needs: reading /boot via the
-// internal __grub-list subcommand, and setting the next boot entry.
-// All entries are exact-argument matches, so the rule is minimal.
 func writeSudoers(username string) error {
 	var entries []string
 
@@ -297,6 +278,13 @@ func writeSudoers(username string) error {
 			if abs, err := filepath.Abs(p); err == nil {
 				entries = append(entries, abs)
 			}
+		}
+	}
+
+	// systemctl reboot — used by the pending-boot flow.
+	if p, err := exec.LookPath("systemctl"); err == nil {
+		if abs, err := filepath.Abs(p); err == nil {
+			entries = append(entries, abs+" reboot")
 		}
 	}
 

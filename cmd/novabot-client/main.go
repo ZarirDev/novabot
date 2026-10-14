@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -28,9 +30,10 @@ usage:
   novabot-client run          start streaming + boot agent (systemd unit)
   novabot-client tui          interactive menu
   novabot-client boot <name>  set the next GRUB boot entry (one-shot)
-  novabot-client entries      list GRUB boot entries
+  novabot-client entries      list boot entries
   novabot-client grub-diag    show what's on disk for GRUB
   novabot-client register     push boot entries to the server
+  novabot-client checkin      ask the server for a pending boot
   novabot-client install      install as a system service (requires root)
   novabot-client update       pull, rebuild, reinstall, restart (root)
   novabot-client uninstall    remove the system service (root)
@@ -68,6 +71,8 @@ func main() {
 		cmdGrubDiag(rest)
 	case "register":
 		cmdRegister(rest)
+	case "checkin":
+		cmdCheckin(rest)
 	case "install":
 		cmdInstall(rest)
 	case "update":
@@ -87,10 +92,6 @@ func main() {
 	}
 }
 
-// cmdGrubListInternal is the root-side half of the scan. The client
-// invokes it via `sudo -n /usr/local/bin/novabot-client __grub-list`
-// when running as a non-root user, because /boot is normally only
-// readable by root.
 func cmdGrubListInternal(args []string) {
 	if os.Geteuid() != 0 {
 		fmt.Fprintln(os.Stderr, "__grub-list is an internal command; run via sudo")
@@ -194,6 +195,15 @@ func cmdRun(args []string) {
 	} else {
 		log.Printf("[BOOT] disabled — GRUB / efibootmgr not usable")
 	}
+
+	// Startup checkin: ask the server if there's a pending boot. Runs
+	// once; gives the network a few seconds to settle first.
+	go func() {
+		time.Sleep(3 * time.Second)
+		if err := bootCheckin(cfg); err != nil {
+			log.Printf("[BOOT] startup checkin failed: %v", err)
+		}
+	}()
 
 	if err := runStream(ctx, cfg); err != nil {
 		log.Printf("[CLIENT] streamer error: %v", err)
@@ -301,7 +311,7 @@ func cmdTUI(args []string) {
 			GRUBDiagnosis: grub.Diagnose(),
 		}
 		if s.CanListGRUB {
-			s.GRUBEntries, _ = grub.List()
+			s.GRUBEntries = grub.ListAll()
 			s.GRUBDefault = grub.Default()
 		}
 		return s
@@ -365,7 +375,7 @@ func splitListen(addr string) (host, port string, err error) {
 	return addr, "9753", nil
 }
 
-// ── boot / entries / diag / register ───────────────────
+// ── boot / entries / diag / register / checkin ─────────
 
 func cmdBoot(args []string) {
 	if len(args) == 0 {
@@ -382,18 +392,20 @@ func cmdBoot(args []string) {
 
 func cmdEntries(args []string) {
 	_ = args
-	entries, err := grub.List()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "entries: %v\n", err)
+	entries := grub.ListAll()
+	if len(entries) == 0 {
+		fmt.Fprintln(os.Stderr, "no boot entries found")
 		os.Exit(1)
 	}
 	def := grub.Default()
-	for i, e := range entries {
+	for _, e := range entries {
 		marker := " "
-		if e.Title == def {
+		if e.Current {
 			marker = "●"
+		} else if e.Title == def {
+			marker = "·"
 		}
-		fmt.Printf("  %s [%d] %s\n", marker, i, e.Title)
+		fmt.Printf("  %s %-4s  %s  (%s)\n", marker, e.ID, e.Title, e.Source)
 	}
 }
 
@@ -414,6 +426,20 @@ func cmdRegister(args []string) {
 		os.Exit(1)
 	}
 	fmt.Println("✓ boot entries registered with the server")
+}
+
+func cmdCheckin(args []string) {
+	cf := parseCommon("checkin", args)
+	cfg, _, err := loadConfig(cf)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	if err := bootCheckin(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "checkin: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("✓ checkin complete")
 }
 
 func cmdConfig(args []string) {
@@ -439,4 +465,101 @@ func maskToken(t string) string {
 		return t
 	}
 	return t[:8] + "…"
+}
+
+// ── startup checkin ────────────────────────────────────
+
+func bootCheckin(cfg *clientcfg.Config) error {
+	mac := register.LocalMAC()
+	if mac == "" {
+		return fmt.Errorf("could not determine local MAC")
+	}
+	var lastErr error
+	for i := 0; i < 5; i++ {
+		if i > 0 {
+			time.Sleep(3 * time.Second)
+		}
+		if err := doCheckin(cfg, mac); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			log.Printf("[BOOT] checkin attempt %d/5 failed: %v", i+1, err)
+		}
+	}
+	return lastErr
+}
+
+func doCheckin(cfg *clientcfg.Config, mac string) error {
+	url := fmt.Sprintf("http://%s:%d/api/v1/wol/boot-checkin", cfg.Server, cfg.HTTPPort)
+	body, _ := json.Marshal(map[string]string{
+		"mac":      mac,
+		"hostname": register.Hostname(),
+	})
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+
+	var reply struct {
+		Action string `json:"action"`
+		ID     string `json:"id"`
+		Source string `json:"source"`
+		Title  string `json:"title"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+		return err
+	}
+
+	log.Printf("[BOOT] checkin → action=%q id=%q source=%q reason=%q",
+		reply.Action, reply.ID, reply.Source, reply.Reason)
+
+	if reply.Action != "set-and-reboot" {
+		return nil
+	}
+
+	if alreadyBooted(reply.ID, reply.Source) {
+		log.Printf("[BOOT] already booted into %s/%s — no action needed",
+			reply.Source, reply.ID)
+		return nil
+	}
+
+	log.Printf("[BOOT] pending boot to %s/%s — setting BootNext and rebooting",
+		reply.Source, reply.ID)
+
+	if err := grub.SetEntry(grub.Entry{
+		ID:     reply.ID,
+		Source: reply.Source,
+		Title:  reply.Title,
+	}); err != nil {
+		return fmt.Errorf("set entry: %w", err)
+	}
+
+	time.Sleep(2 * time.Second)
+	log.Printf("[BOOT] rebooting into %s/%s", reply.Source, reply.ID)
+	return exec.Command("sudo", "-n", "systemctl", "reboot").Run()
+}
+
+func alreadyBooted(id, source string) bool {
+	if source != "efi" {
+		return false
+	}
+	for _, e := range grub.ListAll() {
+		if e.ID == id && e.Source == "efi" && e.Current {
+			return true
+		}
+	}
+	return false
 }

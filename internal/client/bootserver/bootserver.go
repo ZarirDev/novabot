@@ -25,7 +25,6 @@ func New(addr, token string) *Server {
 	return &Server{addr: addr, token: token}
 }
 
-// Start blocks until ctx is cancelled, then shuts down gracefully.
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/boot", s.handleBoot)
@@ -51,7 +50,6 @@ func (s *Server) Start(ctx context.Context) error {
 		log.Printf("[BOOT] listening on %s", s.addr)
 	}
 
-	// Graceful shutdown when the parent context is cancelled.
 	go func() {
 		<-ctx.Done()
 		log.Printf("[BOOT] context cancelled — shutting down http server")
@@ -119,6 +117,18 @@ func (s *Server) handleBoot(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[BOOT] source missing — defaulting to grub, id=%q", req.ID)
 	}
 
+	// Short-circuit: already booted into the target.
+	if isCurrentlyRunning(req.ID, req.Source) {
+		log.Printf("[BOOT] already booted into %s/%s — no action", req.Source, req.ID)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status": "already-running",
+			"id":     req.ID,
+			"source": req.Source,
+		})
+		return
+	}
+
 	entry := grub.Entry{
 		ID:     req.ID,
 		Title:  req.Title,
@@ -160,6 +170,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status": "ok",
 		"host":   hostname(),
 	})
+}
+
+// isCurrentlyRunning returns true if the running OS corresponds to
+// the given boot target. Only meaningful for EFI targets.
+func isCurrentlyRunning(id, source string) bool {
+	if source != "efi" {
+		return false
+	}
+	for _, e := range grub.ListAll() {
+		if e.ID == id && e.Source == "efi" && e.Current {
+			return true
+		}
+	}
+	return false
 }
 
 func hostname() string {

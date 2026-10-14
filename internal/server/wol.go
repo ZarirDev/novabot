@@ -40,6 +40,7 @@ func (s *WoLServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/wol/scan", s.handleScan)
 	mux.HandleFunc("/api/v1/wol/wake/", s.handleWake)
 	mux.HandleFunc("/api/v1/wol/boot-register", s.handleBootRegister)
+	mux.HandleFunc("/api/v1/wol/boot-checkin", s.handleBootCheckin)
 	mux.HandleFunc("/api/v1/wol/boot/", s.handleBootNext)
 }
 
@@ -133,7 +134,7 @@ func (s *WoLServer) handleWake(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleBootRegister accepts a POST from a novabot-client on the LAN
-// describing its GRUB entries. The device is upserted by MAC.
+// describing its boot entries. The device is upserted by MAC.
 func (s *WoLServer) handleBootRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -177,18 +178,27 @@ func (s *WoLServer) handleBootRegister(w http.ResponseWriter, r *http.Request) {
 	d.BootEntries = reg.Entries
 	d.BootDefault = reg.Default
 
+	// Preserve pending boot across re-registration (the client may
+	// re-register on every startup).
+	existing, _ := s.store.Get(reg.MAC)
+	d.PendingBoot = existing.PendingBoot
+
 	if err := s.store.Add(d); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	log.Printf("[WOL] boot-register: %q (%s) · %d entries · addr=%s",
-		d.Name, d.MAC, len(reg.Entries), reg.BootAddr)
+		d.Name, d.MAC, len(reg.Entries), d.BootAddr)
 
 	s.writeJSON(w, http.StatusOK, d)
 }
 
-// handleBootNext tells a registered client to set its next GRUB entry.
-// POST /api/v1/wol/boot/{mac}  body: {"title": "..."}
+// handleBootNext sets the next boot target for a device.
+//
+// Two modes:
+//   - agent reachable: POST directly, machine is already on.
+//   - agent unreachable: queue a PendingBoot, send WoL. The client
+//     will pick it up on startup via /boot-checkin.
 func (s *WoLServer) handleBootNext(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -199,16 +209,10 @@ func (s *WoLServer) handleBootNext(w http.ResponseWriter, r *http.Request) {
 
 	d, ok := s.store.Get(mac)
 	if !ok {
-		log.Printf("[WOL-BOOT] no device with mac %q", mac)
+		log.Printf("[WOL-BOOT] unknown device %q", mac)
 		http.Error(w, "unknown device", http.StatusNotFound)
 		return
 	}
-	if d.BootAddr == "" {
-		log.Printf("[WOL-BOOT] device %q has no boot_addr — was it registered?", d.Name)
-		http.Error(w, "device has no boot agent registered", http.StatusBadRequest)
-		return
-	}
-	log.Printf("[WOL-BOOT] device %q → boot_addr=%s", d.Name, d.BootAddr)
 
 	var req struct {
 		ID     string `json:"id"`
@@ -216,12 +220,10 @@ func (s *WoLServer) handleBootNext(w http.ResponseWriter, r *http.Request) {
 		Title  string `json:"title"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		log.Printf("[WOL-BOOT] decode error: %v", err)
+		log.Printf("[WOL-BOOT] invalid body: %v", err)
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	log.Printf("[WOL-BOOT] request: id=%q source=%q title=%q", req.ID, req.Source, req.Title)
-
 	if req.ID == "" && req.Title == "" {
 		http.Error(w, "id or title required", http.StatusBadRequest)
 		return
@@ -232,21 +234,140 @@ func (s *WoLServer) handleBootNext(w http.ResponseWriter, r *http.Request) {
 			req.ID = req.Title
 		}
 	}
+	log.Printf("[WOL-BOOT] device=%q request: id=%q source=%q title=%q",
+		d.Name, req.ID, req.Source, req.Title)
 
-	log.Printf("[WOL-BOOT] calling boot agent at %s", d.BootAddr)
-	if err := callBootAgent(d.BootAddr, d.BootToken, req.ID, req.Source, req.Title); err != nil {
-		log.Printf("[WOL-BOOT] agent call FAILED: %v", err)
-		http.Error(w, err.Error(), http.StatusBadGateway)
+	// Path 1: client boot agent reachable → direct.
+	if d.BootAddr != "" && agentAlive(d.BootAddr, 1500*time.Millisecond) {
+		log.Printf("[WOL-BOOT] agent reachable at %s — direct send", d.BootAddr)
+		if err := callBootAgent(d.BootAddr, d.BootToken, req.ID, req.Source, req.Title); err == nil {
+			log.Printf("[WOL-BOOT] direct send OK")
+			s.writeJSON(w, http.StatusOK, map[string]string{
+				"status": "sent",
+				"mode":   "direct",
+				"mac":    d.MAC,
+				"id":     req.ID,
+				"source": req.Source,
+			})
+			return
+		} else {
+			log.Printf("[WOL-BOOT] direct send failed: %v — falling back to WoL", err)
+		}
+	} else {
+		log.Printf("[WOL-BOOT] agent not reachable — queueing boot and sending WoL")
+	}
+
+	// Path 2: machine is off. Queue PendingBoot, then WoL.
+	d.PendingBoot = &wol.PendingBoot{
+		ID:     req.ID,
+		Source: req.Source,
+		Title:  req.Title,
+		SetAt:  time.Now(),
+	}
+	if err := s.store.Add(d); err != nil {
+		log.Printf("[WOL-BOOT] save pending: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	log.Printf("[WOL-BOOT] agent accepted: %q via %s", req.ID, req.Source)
+
+	if err := wol.SendToAll(d.MAC, d.IP, d.Broadcast, d.Port); err != nil {
+		log.Printf("[WOL-BOOT] WoL send failed: %v", err)
+		http.Error(w, "wol send failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	log.Printf("[WOL-BOOT] WoL sent to %s, pending boot=%s/%s queued",
+		d.MAC, req.Source, req.ID)
 
 	s.writeJSON(w, http.StatusOK, map[string]string{
-		"status": "ok",
+		"status": "queued",
+		"mode":   "wol",
 		"mac":    d.MAC,
 		"id":     req.ID,
 		"source": req.Source,
 	})
+}
+
+// handleBootCheckin is called by a client on startup. It asks the
+// server: "I just booted, do you have a pending boot for me?"
+//
+// Expires pending boots after 5 minutes so a failed WoL doesn't
+// surprise-reboot a machine the user powers on days later.
+func (s *WoLServer) handleBootCheckin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		MAC      string `json:"mac"`
+		Hostname string `json:"hostname"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.MAC == "" {
+		http.Error(w, "mac required", http.StatusBadRequest)
+		return
+	}
+	log.Printf("[WOL-BOOT] checkin from %s (%s)", req.Hostname, req.MAC)
+
+	d, ok := s.store.Get(req.MAC)
+	if !ok {
+		log.Printf("[WOL-BOOT] checkin: unknown device %s", req.MAC)
+		s.writeJSON(w, http.StatusOK, map[string]string{
+			"action": "none",
+			"reason": "unknown-device",
+		})
+		return
+	}
+
+	if d.PendingBoot == nil {
+		s.writeJSON(w, http.StatusOK, map[string]string{"action": "none"})
+		return
+	}
+
+	if time.Since(d.PendingBoot.SetAt) > 5*time.Minute {
+		log.Printf("[WOL-BOOT] pending boot for %s expired (set %s ago)",
+			d.Name, time.Since(d.PendingBoot.SetAt).Round(time.Second))
+		d.PendingBoot = nil
+		_ = s.store.Add(d)
+		s.writeJSON(w, http.StatusOK, map[string]string{
+			"action": "none",
+			"reason": "expired",
+		})
+		return
+	}
+
+	pb := d.PendingBoot
+	d.PendingBoot = nil
+	if err := s.store.Add(d); err != nil {
+		log.Printf("[WOL-BOOT] clear pending: %v", err)
+	}
+	log.Printf("[WOL-BOOT] checkin → delivering pending boot %s/%s to %s",
+		pb.Source, pb.ID, d.Name)
+
+	s.writeJSON(w, http.StatusOK, map[string]string{
+		"action": "set-and-reboot",
+		"id":     pb.ID,
+		"source": pb.Source,
+		"title":  pb.Title,
+	})
+}
+
+// agentAlive returns true if the boot agent's /health endpoint
+// responds within the timeout.
+func agentAlive(addr string, timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	url := strings.TrimRight(addr, "/") + "/health"
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 func callBootAgent(addr, token, id, source, title string) error {

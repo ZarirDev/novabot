@@ -16,14 +16,13 @@ import (
 	"time"
 )
 
-// Entry is one bootable target. Source is "efi" for firmware entries
-// (managed via efibootmgr) or "grub" for entries inside grub.cfg.
 type Entry struct {
-	Index  int    `json:"index"`
-	ID     string `json:"id"` // EFI: "0001". GRUB: the entry title.
-	Title  string `json:"title"`
-	Source string `json:"source"` // "efi" | "grub"
-	Active bool   `json:"active,omitempty"`
+	Index   int    `json:"index"`
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Source  string `json:"source"`
+	Active  bool   `json:"active,omitempty"`  // enabled in firmware (has the *)
+	Current bool   `json:"current,omitempty"` // this is what we booted from
 }
 
 type ScanResult struct {
@@ -54,11 +53,8 @@ var fallbackPaths = []string{
 
 var searchRoots = []string{"/boot", "/efi"}
 
-// Match menuentry lines at any indentation. GRUB's own generation
-// scripts wrap entries in `if [ ... ]` blocks, which indents them.
 var menuentryRe = regexp.MustCompile(`^\s*menuentry\s+['"]([^'"]+)['"]`)
 
-// efibootmgr output line: `Boot0001* Windows Boot Manager`
 var efiBootRe = regexp.MustCompile(`^Boot([0-9A-Fa-f]{4})(\*?)\s+(.*)$`)
 
 const installedBin = "/usr/local/bin/novabot-client"
@@ -126,8 +122,6 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// ScanDirect runs as root and returns the raw view of /boot plus
-// efibootmgr output when UEFI.
 func ScanDirect() *ScanResult {
 	r := &ScanResult{
 		Tools:      map[string]string{},
@@ -146,7 +140,6 @@ func ScanDirect() *ScanResult {
 		}
 	}
 
-	// grub.cfg
 	for _, p := range fallbackPaths {
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
 			r.CfgPath = p
@@ -162,7 +155,6 @@ func ScanDirect() *ScanResult {
 		}
 	}
 
-	// grubenv
 	if r.CfgPath != "" {
 		candidate := filepath.Join(filepath.Dir(r.CfgPath), "grubenv")
 		if _, err := os.Stat(candidate); err == nil {
@@ -182,11 +174,6 @@ func ScanDirect() *ScanResult {
 		r.SystemdBoot = true
 	}
 
-	// efibootmgr output — only useful on UEFI. Ask for verbose output
-	// explicitly so we always get the same shape regardless of distro
-	// defaults, then let the parser strip the device path back off.
-	// Verbose output is the only reliable way to distinguish entries
-	// whose names collide (e.g. multiple "UEFI OS" entries).
 	if r.Firmware == "UEFI" {
 		if _, ok := r.Tools["efibootmgr"]; ok {
 			if out, err := exec.Command("efibootmgr", "-v").Output(); err == nil {
@@ -248,9 +235,6 @@ func scanFor(name string) string {
 
 // ── listing ────────────────────────────────────────────
 
-// ListAll returns all boot targets: EFI firmware entries first (they
-// work directly, no double-reboot), then any GRUB menuentries that
-// aren't already represented by an EFI entry with the same title.
 func ListAll() []Entry {
 	var out []Entry
 	seen := map[string]bool{}
@@ -264,8 +248,6 @@ func ListAll() []Entry {
 
 	if grub := listGRUBFromCache(); len(grub) > 0 {
 		for _, e := range grub {
-			// Skip GRUB entries that just wrap an EFI entry we've
-			// already listed — they're the same target twice.
 			if strings.HasSuffix(e.Title, " (EFI BootNext)") {
 				continue
 			}
@@ -282,7 +264,6 @@ func ListAll() []Entry {
 	return out
 }
 
-// List is kept for backwards compatibility — returns GRUB entries only.
 func List() ([]Entry, error) {
 	r, err := loadScan()
 	if err != nil {
@@ -348,10 +329,6 @@ func parseEFIOutput(out string) []Entry {
 		active := m[2] == "*"
 		label := m[3]
 
-		// efibootmgr sometimes prints the full EFI device path after
-		// the label, separated by a tab. Strip it. Also handles the
-		// rare case where the path leaks through without a tab but
-		// starts with \EFI\.
 		if i := strings.IndexByte(label, '\t'); i >= 0 {
 			label = label[:i]
 		}
@@ -364,11 +341,12 @@ func parseEFIOutput(out string) []Entry {
 		}
 
 		entries = append(entries, Entry{
-			ID:     id,
-			Title:  label,
-			Source: "efi",
-			Active: active,
-			Index:  boolToInt(id == current),
+			ID:      id,
+			Title:   label,
+			Source:  "efi",
+			Active:  active,
+			Current: id == current,
+			Index:   boolToInt(id == current),
 		})
 	}
 	return entries
@@ -505,7 +483,7 @@ func Diagnose() string {
 		fmt.Fprintf(&b, "\n  UEFI firmware entries (%d):\n", len(efi))
 		for _, e := range efi {
 			marker := " "
-			if e.Active {
+			if e.Current {
 				marker = "●"
 			}
 			fmt.Fprintf(&b, "    %s %s  %s\n", marker, e.ID, e.Title)
@@ -523,7 +501,11 @@ func Diagnose() string {
 	all := ListAll()
 	fmt.Fprintf(&b, "\n  effective boot targets (%d):\n", len(all))
 	for _, e := range all {
-		fmt.Fprintf(&b, "    %-4s  %s  (%s)\n", e.ID, e.Title, e.Source)
+		marker := " "
+		if e.Current {
+			marker = "●"
+		}
+		fmt.Fprintf(&b, "    %s %-4s  %s  (%s)\n", marker, e.ID, e.Title, e.Source)
 	}
 
 	b.WriteString("\n  verdict: ")
@@ -540,12 +522,10 @@ func Diagnose() string {
 
 // ── setting the next boot ──────────────────────────────
 
-// SetNext is kept for backwards compatibility — takes a GRUB title.
 func SetNext(title string) error {
 	return SetEntry(Entry{ID: title, Title: title, Source: "grub"})
 }
 
-// SetEntry dispatches based on Source.
 func SetEntry(e Entry) error {
 	log.Printf("[GRUB] SetEntry: source=%q id=%q title=%q", e.Source, e.ID, e.Title)
 	switch e.Source {
