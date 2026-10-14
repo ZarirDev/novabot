@@ -107,8 +107,6 @@ func cmdGrubListInternal(args []string) {
 	_, _ = os.Stdout.Write(out)
 }
 
-// ── flags ──────────────────────────────────────────────
-
 type commonFlags struct {
 	config   string
 	server   string
@@ -168,6 +166,9 @@ func cmdRun(args []string) {
 		os.Exit(1)
 	}
 
+	log.Printf("[CLIENT] starting: server=%s udpPort=%d httpPort=%d bootListen=%s",
+		cfg.Server, cfg.Port, cfg.HTTPPort, cfg.BootListen)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -181,6 +182,7 @@ func cmdRun(args []string) {
 
 	var wg sync.WaitGroup
 
+	// Boot agent: HTTP server for setting next boot.
 	if grub.CanSetNext() {
 		wg.Add(1)
 		go func() {
@@ -193,18 +195,18 @@ func cmdRun(args []string) {
 			}
 		}()
 	} else {
-		log.Printf("[BOOT] disabled — GRUB / efibootmgr not usable")
+		log.Printf("[BOOT] agent disabled — GRUB/efibootmgr not usable")
+		log.Printf("[BOOT] run `novabot-client grub-diag` for details")
 	}
 
-	// Startup checkin: ask the server if there's a pending boot. Runs
-	// once; gives the network a few seconds to settle first.
+	// Startup sequence: wait for net → register → checkin.
+	wg.Add(1)
 	go func() {
-		time.Sleep(3 * time.Second)
-		if err := bootCheckin(cfg); err != nil {
-			log.Printf("[BOOT] startup checkin failed: %v", err)
-		}
+		defer wg.Done()
+		startupSequence(ctx, cfg)
 	}()
 
+	// Audio streaming (blocks until ctx cancelled).
 	if err := runStream(ctx, cfg); err != nil {
 		log.Printf("[CLIENT] streamer error: %v", err)
 		cancel()
@@ -214,8 +216,222 @@ func cmdRun(args []string) {
 	log.Printf("[CLIENT] all workers exited")
 }
 
+// startupSequence handles the cold-boot flow: wait for the network to
+// come up, register our identity + boot entries with the server, then
+// ask if there's a pending boot to act on.
+func startupSequence(ctx context.Context, cfg *clientcfg.Config) {
+	log.Printf("[STARTUP] === startup sequence begin ===")
+
+	// 1. Wait for network.
+	var mac, ip string
+	for attempt := 1; attempt <= 30; attempt++ {
+		if ctx.Err() != nil {
+			log.Printf("[STARTUP] cancelled before network came up")
+			return
+		}
+		ip = register.LocalIP()
+		mac = register.LocalMAC()
+		if ip != "" && mac != "" {
+			log.Printf("[STARTUP] network up after %d attempt(s): ip=%s mac=%s",
+				attempt, ip, mac)
+			break
+		}
+		log.Printf("[STARTUP] network not ready (attempt %d/30) ip=%q mac=%q",
+			attempt, ip, mac)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+	if ip == "" || mac == "" {
+		log.Printf("[STARTUP] network did not come up within 60s — aborting")
+		return
+	}
+
+	// 2. Register.
+	log.Printf("[STARTUP] === register phase ===")
+	if err := registerWithRetry(ctx, cfg, mac, ip); err != nil {
+		log.Printf("[STARTUP] registration failed after retries: %v", err)
+		// Continue to checkin — a stale registration is better than none.
+	} else {
+		log.Printf("[STARTUP] registration OK")
+	}
+
+	// Small pause so the server has time to process the registration
+	// before the checkin lands.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	// 3. Checkin.
+	log.Printf("[STARTUP] === checkin phase ===")
+	if err := checkinWithRetry(ctx, cfg, mac); err != nil {
+		log.Printf("[STARTUP] checkin failed after retries: %v", err)
+	}
+
+	log.Printf("[STARTUP] === startup sequence complete ===")
+}
+
+func registerWithRetry(ctx context.Context, cfg *clientcfg.Config, mac, ip string) error {
+	entries := grub.ListAll()
+	_, port, _ := splitListen(cfg.BootListen)
+	bootAddr := fmt.Sprintf("http://%s:%s", ip, port)
+
+	reg := register.Registration{
+		Hostname: register.Hostname(),
+		MAC:      mac,
+		IP:       ip,
+		BootAddr: bootAddr,
+		Token:    cfg.BootToken,
+		Entries:  entries,
+		Default:  grub.Default(),
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= 10; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		log.Printf("[REGISTER] attempt %d/10 → %s:%d (entries=%d bootAddr=%s)",
+			attempt, cfg.Server, cfg.HTTPPort, len(entries), bootAddr)
+		err := register.Register(cfg.Server, cfg.HTTPPort, reg)
+		if err == nil {
+			log.Printf("[REGISTER] OK")
+			return nil
+		}
+		lastErr = err
+		log.Printf("[REGISTER] attempt %d failed: %v", attempt, err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
+		}
+	}
+	return lastErr
+}
+
+func checkinWithRetry(ctx context.Context, cfg *clientcfg.Config, mac string) error {
+	var lastErr error
+	for attempt := 1; attempt <= 10; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		log.Printf("[CHECKIN] attempt %d/10", attempt)
+		if err := doCheckin(ctx, cfg, mac); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			log.Printf("[CHECKIN] attempt %d failed: %v", attempt, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
+		}
+	}
+	return lastErr
+}
+
+func doCheckin(ctx context.Context, cfg *clientcfg.Config, mac string) error {
+	url := fmt.Sprintf("http://%s:%d/api/v1/wol/boot-checkin", cfg.Server, cfg.HTTPPort)
+	body, _ := json.Marshal(map[string]string{
+		"mac":      mac,
+		"hostname": register.Hostname(),
+	})
+	log.Printf("[CHECKIN] POST %s mac=%s", url, mac)
+
+	httpCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(httpCtx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+
+	var reply struct {
+		Action string `json:"action"`
+		ID     string `json:"id"`
+		Source string `json:"source"`
+		Title  string `json:"title"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+		return err
+	}
+
+	log.Printf("[CHECKIN] response action=%q id=%q source=%q title=%q reason=%q",
+		reply.Action, reply.ID, reply.Source, reply.Title, reply.Reason)
+
+	switch reply.Action {
+	case "", "none":
+		log.Printf("[CHECKIN] no pending boot — done")
+		return nil
+	case "set-and-reboot":
+		// fall through
+	default:
+		log.Printf("[CHECKIN] unknown action %q — ignoring", reply.Action)
+		return nil
+	}
+
+	if alreadyBooted(reply.ID, reply.Source) {
+		log.Printf("[CHECKIN] already booted into %s/%s — no action needed",
+			reply.Source, reply.ID)
+		return nil
+	}
+
+	log.Printf("[CHECKIN] setting next boot to %s/%s and rebooting",
+		reply.Source, reply.ID)
+
+	if err := grub.SetEntry(grub.Entry{
+		ID:     reply.ID,
+		Source: reply.Source,
+		Title:  reply.Title,
+	}); err != nil {
+		return fmt.Errorf("SetEntry: %w", err)
+	}
+	log.Printf("[CHECKIN] SetEntry OK")
+
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-time.After(2 * time.Second):
+	}
+
+	log.Printf("[CHECKIN] executing sudo systemctl reboot")
+	if err := grub.Reboot(); err != nil {
+		return fmt.Errorf("reboot: %w", err)
+	}
+	return nil
+}
+
+func alreadyBooted(id, source string) bool {
+	if source != "efi" {
+		return false
+	}
+	for _, e := range grub.ListAll() {
+		if e.ID == id && e.Source == "efi" && e.Current {
+			return true
+		}
+	}
+	return false
+}
+
 func runStream(ctx context.Context, cfg *clientcfg.Config) error {
-	log.Printf("[CLIENT] streaming to %s:%d", cfg.Server, cfg.Port)
+	log.Printf("[CLIENT] streamer starting → %s:%d", cfg.Server, cfg.Port)
 
 	if q := os.Getenv("AUDIO_QUALITY"); q != "" {
 		_ = audio.SetActiveQuality(q)
@@ -270,7 +486,7 @@ func runStream(ctx context.Context, cfg *clientcfg.Config) error {
 	}
 
 	<-ctx.Done()
-	log.Println("[CLIENT] shutting down")
+	log.Println("[CLIENT] shutting down streamer")
 	return nil
 }
 
@@ -340,13 +556,13 @@ func serviceActive() bool {
 
 func registerNow(cfg *clientcfg.Config) error {
 	entries := grub.ListAll()
-	if len(entries) == 0 {
-		return fmt.Errorf("no boot targets found on this machine")
-	}
 	ip := register.LocalIP()
 	mac := register.LocalMAC()
 	if ip == "" {
 		return fmt.Errorf("could not determine local IP")
+	}
+	if mac == "" {
+		return fmt.Errorf("could not determine local MAC")
 	}
 	_, port, _ := splitListen(cfg.BootListen)
 	bootAddr := fmt.Sprintf("http://%s:%s", ip, port)
@@ -360,6 +576,8 @@ func registerNow(cfg *clientcfg.Config) error {
 		Entries:  entries,
 		Default:  grub.Default(),
 	}
+	log.Printf("[REGISTER] manual register: mac=%s ip=%s entries=%d",
+		mac, ip, len(entries))
 	return register.Register(cfg.Server, cfg.HTTPPort, reg)
 }
 
@@ -435,7 +653,12 @@ func cmdCheckin(args []string) {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
 	}
-	if err := bootCheckin(cfg); err != nil {
+	mac := register.LocalMAC()
+	if mac == "" {
+		fmt.Fprintln(os.Stderr, "checkin: could not determine local MAC")
+		os.Exit(1)
+	}
+	if err := doCheckin(context.Background(), cfg, mac); err != nil {
 		fmt.Fprintf(os.Stderr, "checkin: %v\n", err)
 		os.Exit(1)
 	}
@@ -465,101 +688,4 @@ func maskToken(t string) string {
 		return t
 	}
 	return t[:8] + "…"
-}
-
-// ── startup checkin ────────────────────────────────────
-
-func bootCheckin(cfg *clientcfg.Config) error {
-	mac := register.LocalMAC()
-	if mac == "" {
-		return fmt.Errorf("could not determine local MAC")
-	}
-	var lastErr error
-	for i := 0; i < 5; i++ {
-		if i > 0 {
-			time.Sleep(3 * time.Second)
-		}
-		if err := doCheckin(cfg, mac); err == nil {
-			return nil
-		} else {
-			lastErr = err
-			log.Printf("[BOOT] checkin attempt %d/5 failed: %v", i+1, err)
-		}
-	}
-	return lastErr
-}
-
-func doCheckin(cfg *clientcfg.Config, mac string) error {
-	url := fmt.Sprintf("http://%s:%d/api/v1/wol/boot-checkin", cfg.Server, cfg.HTTPPort)
-	body, _ := json.Marshal(map[string]string{
-		"mac":      mac,
-		"hostname": register.Hostname(),
-	})
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("server returned %d", resp.StatusCode)
-	}
-
-	var reply struct {
-		Action string `json:"action"`
-		ID     string `json:"id"`
-		Source string `json:"source"`
-		Title  string `json:"title"`
-		Reason string `json:"reason"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
-		return err
-	}
-
-	log.Printf("[BOOT] checkin → action=%q id=%q source=%q reason=%q",
-		reply.Action, reply.ID, reply.Source, reply.Reason)
-
-	if reply.Action != "set-and-reboot" {
-		return nil
-	}
-
-	if alreadyBooted(reply.ID, reply.Source) {
-		log.Printf("[BOOT] already booted into %s/%s — no action needed",
-			reply.Source, reply.ID)
-		return nil
-	}
-
-	log.Printf("[BOOT] pending boot to %s/%s — setting BootNext and rebooting",
-		reply.Source, reply.ID)
-
-	if err := grub.SetEntry(grub.Entry{
-		ID:     reply.ID,
-		Source: reply.Source,
-		Title:  reply.Title,
-	}); err != nil {
-		return fmt.Errorf("set entry: %w", err)
-	}
-
-	time.Sleep(2 * time.Second)
-	log.Printf("[BOOT] rebooting into %s/%s", reply.Source, reply.ID)
-	return exec.Command("sudo", "-n", "systemctl", "reboot").Run()
-}
-
-func alreadyBooted(id, source string) bool {
-	if source != "efi" {
-		return false
-	}
-	for _, e := range grub.ListAll() {
-		if e.ID == id && e.Source == "efi" && e.Current {
-			return true
-		}
-	}
-	return false
 }

@@ -21,8 +21,8 @@ type Entry struct {
 	ID      string `json:"id"`
 	Title   string `json:"title"`
 	Source  string `json:"source"`
-	Active  bool   `json:"active,omitempty"`  // enabled in firmware (has the *)
-	Current bool   `json:"current,omitempty"` // this is what we booted from
+	Active  bool   `json:"active,omitempty"`
+	Current bool   `json:"current,omitempty"`
 }
 
 type ScanResult struct {
@@ -233,19 +233,15 @@ func scanFor(name string) string {
 	return ""
 }
 
-// ── listing ────────────────────────────────────────────
-
 func ListAll() []Entry {
 	var out []Entry
 	seen := map[string]bool{}
-
 	if efi := listEFIFromCache(); len(efi) > 0 {
 		for _, e := range efi {
 			out = append(out, e)
 			seen[strings.ToLower(e.Title)] = true
 		}
 	}
-
 	if grub := listGRUBFromCache(); len(grub) > 0 {
 		for _, e := range grub {
 			if strings.HasSuffix(e.Title, " (EFI BootNext)") {
@@ -257,7 +253,6 @@ func ListAll() []Entry {
 			out = append(out, e)
 		}
 	}
-
 	for i := range out {
 		out[i].Index = i
 	}
@@ -304,8 +299,6 @@ func listGRUBFromCache() []Entry {
 	}
 	return parseGrubEntries(r.CfgContent)
 }
-
-// ── EFI entries ────────────────────────────────────────
 
 func parseEFIOutput(out string) []Entry {
 	var entries []Entry
@@ -367,8 +360,6 @@ func listEFIFromCache() []Entry {
 	return parseEFIOutput(r.EFIOutput)
 }
 
-// ── default ────────────────────────────────────────────
-
 func Default() string {
 	if r, err := loadScan(); err == nil && r.GrubenvContent != "" {
 		if v := readKey(r.GrubenvContent, "saved_entry"); v != "" {
@@ -400,8 +391,6 @@ func readKey(content, key string) string {
 	return ""
 }
 
-// ── capability checks ──────────────────────────────────
-
 func CanList() bool {
 	r, err := loadScan()
 	if err != nil {
@@ -429,12 +418,41 @@ func CanSetNext() bool {
 
 func Available() bool { return CanList() && CanSetNext() }
 
-// ── diagnostics ────────────────────────────────────────
+// CurrentBootID returns the EFI boot ID of the currently running
+// system, or "" if it can't be determined (e.g. BIOS boot).
+func CurrentBootID() string {
+	r, err := loadScan()
+	if err != nil || r.EFIOutput == "" {
+		return ""
+	}
+	for _, e := range parseEFIOutput(r.EFIOutput) {
+		if e.Current {
+			return e.ID
+		}
+	}
+	return ""
+}
+
+// Reboot triggers a system reboot. Requires a sudoers rule for
+// `systemctl reboot`, which the installer writes by default.
+func Reboot() error {
+	log.Printf("[GRUB] requesting reboot via systemctl")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sudo", "-n", "systemctl", "reboot")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("[GRUB] reboot failed: %v (output=%q)", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	log.Printf("[GRUB] reboot signal sent")
+	return nil
+}
 
 func Diagnose() string {
 	var b strings.Builder
 	b.WriteString("grub diagnostics:\n\n")
-
 	r, err := loadScan()
 	if err != nil {
 		fmt.Fprintf(&b, "  ✗ cannot scan /boot: %v\n", err)
@@ -442,7 +460,6 @@ func Diagnose() string {
 		b.WriteString("      sudo novabot-client grub-diag\n")
 		return b.String()
 	}
-
 	if r.CfgPath != "" {
 		fmt.Fprintf(&b, "  ✓ config      %s (%d bytes)\n", r.CfgPath, len(r.CfgContent))
 	} else {
@@ -453,7 +470,6 @@ func Diagnose() string {
 	} else {
 		b.WriteString("  ✗ no grubenv found\n")
 	}
-
 	b.WriteString("\n  tools:\n")
 	for _, tool := range []string{
 		"grub-reboot", "grub-editenv", "grub-mkconfig", "sudo", "efibootmgr",
@@ -464,20 +480,16 @@ func Diagnose() string {
 			fmt.Fprintf(&b, "    ✗ %-14s not in PATH\n", tool)
 		}
 	}
-
 	fmt.Fprintf(&b, "\n  firmware: %s\n", r.Firmware)
-
 	if len(r.BootMounts) > 0 {
 		b.WriteString("\n  boot mounts:\n")
 		for _, m := range r.BootMounts {
 			fmt.Fprintf(&b, "    %s\n", m)
 		}
 	}
-
 	if r.SystemdBoot {
 		b.WriteString("\n  ⚠ systemd-boot detected (/boot/loader/loader.conf present)\n")
 	}
-
 	if r.EFIOutput != "" {
 		efi := parseEFIOutput(r.EFIOutput)
 		fmt.Fprintf(&b, "\n  UEFI firmware entries (%d):\n", len(efi))
@@ -489,7 +501,6 @@ func Diagnose() string {
 			fmt.Fprintf(&b, "    %s %s  %s\n", marker, e.ID, e.Title)
 		}
 	}
-
 	if r.CfgContent != "" {
 		entries := parseGrubEntries(r.CfgContent)
 		fmt.Fprintf(&b, "\n  GRUB menuentries (%d):\n", len(entries))
@@ -497,7 +508,6 @@ func Diagnose() string {
 			fmt.Fprintf(&b, "    [%d] %s\n", e.Index, e.Title)
 		}
 	}
-
 	all := ListAll()
 	fmt.Fprintf(&b, "\n  effective boot targets (%d):\n", len(all))
 	for _, e := range all {
@@ -507,7 +517,6 @@ func Diagnose() string {
 		}
 		fmt.Fprintf(&b, "    %s %-4s  %s  (%s)\n", marker, e.ID, e.Title, e.Source)
 	}
-
 	b.WriteString("\n  verdict: ")
 	switch {
 	case len(all) > 0:
@@ -519,8 +528,6 @@ func Diagnose() string {
 	}
 	return b.String()
 }
-
-// ── setting the next boot ──────────────────────────────
 
 func SetNext(title string) error {
 	return SetEntry(Entry{ID: title, Title: title, Source: "grub"})
@@ -541,8 +548,6 @@ func SetEntry(e Entry) error {
 		return fmt.Errorf("unknown boot source %q", e.Source)
 	}
 }
-
-// ── EFI ────────────────────────────────────────────────
 
 func setEFINext(id string) error {
 	log.Printf("[GRUB] setEFINext(%q)", id)
@@ -589,8 +594,6 @@ func runEFIBootNext(ctx context.Context, id string, viaSudo bool) error {
 	}
 	return nil
 }
-
-// ── GRUB ───────────────────────────────────────────────
 
 func setGRUBNext(title string) error {
 	log.Printf("[GRUB] setGRUBNext(%q)", title)

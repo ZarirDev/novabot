@@ -117,7 +117,6 @@ func (s *Server) handleBoot(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[BOOT] source missing — defaulting to grub, id=%q", req.ID)
 	}
 
-	// Short-circuit: already booted into the target.
 	if isCurrentlyRunning(req.ID, req.Source) {
 		log.Printf("[BOOT] already booted into %s/%s — no action", req.Source, req.ID)
 		w.Header().Set("Content-Type", "application/json")
@@ -149,6 +148,16 @@ func (s *Server) handleBoot(w http.ResponseWriter, r *http.Request) {
 		"id":     req.ID,
 		"source": req.Source,
 	})
+
+	// Auto-reboot so the user doesn't have to walk over and press
+	// the power button. Delay briefly so the HTTP response flushes.
+	go func() {
+		time.Sleep(2 * time.Second)
+		log.Printf("[BOOT] auto-reboot after successful boot request")
+		if err := grub.Reboot(); err != nil {
+			log.Printf("[BOOT] auto-reboot failed: %v", err)
+		}
+	}()
 }
 
 func (s *Server) handleEntries(w http.ResponseWriter, r *http.Request) {
@@ -172,8 +181,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// isCurrentlyRunning returns true if the running OS corresponds to
-// the given boot target. Only meaningful for EFI targets.
 func isCurrentlyRunning(id, source string) bool {
 	if source != "efi" {
 		return false
