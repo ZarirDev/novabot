@@ -1,4 +1,5 @@
-console.log("[wol] devices.js loaded");
+// ── devices page ──────────────────────────────────────────
+console.log("[wol] devices.js v3 loaded");
 
 const wolState = {
   saved: [],
@@ -6,13 +7,13 @@ const wolState = {
   editing: null,
 };
 
-// lastRenderedKey caches a JSON snapshot of the devices array so we can
-// skip re-rendering (and thus destroying the user's <select> selection)
-// when nothing has actually changed.
+// wolLastKey lets us skip re-rendering when nothing changed. This is
+// what stops the 3-second poll from clobbering the user's dropdown
+// selection every cycle.
 let wolLastKey = "";
 
-// pendingSelection caches each device's currently-selected dropdown
-// value so we can re-apply it after a re-render.
+// wolSelection remembers each device's dropdown choice so re-renders
+// restore it instead of resetting to "default".
 const wolSelection = {};
 
 function wolWireButtons() {
@@ -41,18 +42,11 @@ async function wolLoad() {
 async function wolLoadSaved() {
   try {
     const r = await fetch("/api/v1/wol/devices", { cache: "no-store" });
-    if (!r.ok) {
-      console.warn("[wol] GET /devices non-OK:", r.status);
-      return;
-    }
+    if (!r.ok) return;
     const j = await r.json();
     const newDevices = j.devices || [];
     const key = JSON.stringify(newDevices);
-    if (key === wolLastKey) {
-      // No change — leave the DOM alone. This is what keeps the user's
-      // dropdown selection from being clobbered every 3 seconds.
-      return;
-    }
+    if (key === wolLastKey) return;
     wolLastKey = key;
     wolState.saved = newDevices;
     wolRenderSaved();
@@ -70,7 +64,7 @@ function wolRenderSaved() {
     return;
   }
 
-  // Snapshot current dropdown selections before we blow the DOM away.
+  // Preserve the current dropdown choices before blowing the DOM away.
   root.querySelectorAll(".wol-boot-select").forEach(sel => {
     if (sel.value) wolSelection[sel.dataset.mac] = sel.value;
   });
@@ -107,12 +101,11 @@ function wolRenderSaved() {
             ${hasBoot ? ` · <span class="boot-count">${d.boot_entries.length} boot entries</span>` : ""}
           </div>
         </div>
-        <button class="wol-wake"   data-mac="${escapeHTML(d.mac)}" type="button">wake</button>
         <button class="wol-edit"   data-mac="${escapeHTML(d.mac)}" type="button">edit</button>
         <button class="wol-remove" data-mac="${escapeHTML(d.mac)}" type="button">remove</button>
         <div class="wol-boot">
-          <label>boot</label>
-          <select class="wol-boot-select" data-mac="${escapeHTML(d.mac)}">
+          <label for="boot-${escapeHTML(d.mac)}">boot to</label>
+          <select id="boot-${escapeHTML(d.mac)}" class="wol-boot-select" data-mac="${escapeHTML(d.mac)}">
             ${bootOpts}
           </select>
           <button class="wol-boot-go" data-mac="${escapeHTML(d.mac)}" type="button">go</button>
@@ -122,22 +115,18 @@ function wolRenderSaved() {
     `;
   }).join("");
 
-  // Restore any selections the user had made before the re-render.
+  // Restore any selections.
   root.querySelectorAll(".wol-boot-select").forEach(sel => {
     const prev = wolSelection[sel.dataset.mac];
     if (prev) {
       const opt = Array.from(sel.options).find(o => o.value === prev);
       if (opt) sel.value = prev;
     }
-    // Track live changes so we can preserve them next time.
     sel.addEventListener("change", () => {
       wolSelection[sel.dataset.mac] = sel.value;
     });
   });
 
-  root.querySelectorAll(".wol-wake").forEach(b => {
-    b.addEventListener("click", () => wolWake(b.dataset.mac, b));
-  });
   root.querySelectorAll(".wol-edit").forEach(b => {
     b.addEventListener("click", () => wolStartEdit(b.dataset.mac));
   });
@@ -153,7 +142,7 @@ function wolRenderSaved() {
       const source = opt.dataset.source || "efi";
       const id = sel.value === "__default__" ? "default" : sel.value;
       const title = opt.textContent.trim();
-      console.log("[wol] go clicked", { mac, id, source, title });
+      console.log("[wol] GO clicked", { mac, id, source, title });
       wolBootNext(mac, id, source, title, b);
     });
   });
@@ -166,7 +155,7 @@ async function wolBootNext(mac, id, source, title, btn) {
   const old = btn.textContent;
   btn.disabled = true;
   btn.textContent = "…";
-  console.log("[wol] boot", { mac, id, source, title });
+  console.log("[wol] POST /boot/" + mac, { id, source, title });
   try {
     const r = await fetch("/api/v1/wol/boot/" + encodeURIComponent(mac), {
       method: "POST",
@@ -180,12 +169,12 @@ async function wolBootNext(mac, id, source, title, btn) {
     console.log("[wol] boot response:", j);
     const label = j.mode === "wol-only" ? "woke"
                 : j.mode === "wol"      ? "queued"
+                : j.mode === "direct"   ? "sent"
                 : "✓";
     btn.textContent = label;
-    setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 1800);
-    // Refresh so the pending badge shows up. wolLastKey won't match
-    // anymore because pending_boot was added, so this will re-render.
-    setTimeout(wolLoadSaved, 400);
+    setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 2000);
+    wolLastKey = ""; // force refresh so pending badge shows up
+    setTimeout(wolLoadSaved, 300);
   } catch (e) {
     console.error("[wol] boot failed:", e);
     alert("boot failed: " + e.message);
@@ -204,7 +193,7 @@ async function wolCancelPending(mac, btn) {
       method: "DELETE",
     });
     if (!r.ok) throw new Error(await r.text());
-    wolLastKey = ""; // force a re-render
+    wolLastKey = "";
     await wolLoadSaved();
   } catch (e) {
     alert("cancel failed: " + e.message);
@@ -309,28 +298,12 @@ async function wolSaveFound(idx, btn) {
     if (!r.ok) throw new Error(await r.text());
     wolState.found.splice(idx, 1);
     wolRenderFound();
-    wolLastKey = ""; // force re-render of the saved list
+    wolLastKey = "";
     await wolLoadSaved();
   } catch (e) {
     alert("save failed: " + e.message);
     btn.disabled = false;
     btn.textContent = old;
-  }
-}
-
-async function wolWake(mac, btn) {
-  const old = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = "…";
-  try {
-    const r = await fetch("/api/v1/wol/wake/" + encodeURIComponent(mac), { method: "POST" });
-    if (!r.ok) throw new Error(await r.text());
-    btn.textContent = "✓";
-    setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 1200);
-  } catch (e) {
-    alert("wake failed: " + e.message);
-    btn.textContent = old;
-    btn.disabled = false;
   }
 }
 
