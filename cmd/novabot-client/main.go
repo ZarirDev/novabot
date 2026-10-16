@@ -718,11 +718,32 @@ func cmdCheckin(args []string) {
 func cmdConfig(args []string) {
 	cf := parseCommon("config", args)
 	path := clientcfg.ResolvePath(cf.config)
+
 	cfg, err := clientcfg.Load(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "no config at %s: %v\n", path, err)
+		if os.IsNotExist(err) {
+			fmt.Printf("path:        %s\n", path)
+			fmt.Printf("(no config file at this path yet)\n\n")
+			fmt.Println("a config is only needed if you want to skip flags on every run.")
+			fmt.Println("create one with any of:")
+			fmt.Println()
+			fmt.Println("  # minimum — sets just the server address")
+			fmt.Printf("  #   %s\n", path)
+			fmt.Println("  {")
+			fmt.Println("    \"server\": \"192.168.68.58\",")
+			fmt.Println("    \"port\": 4000,")
+			fmt.Println("    \"http_port\": 8080,")
+			fmt.Println("    \"quiet\": true")
+			fmt.Println("  }")
+			fmt.Println()
+			fmt.Println("or just pass --server on the command line:")
+			fmt.Println("  novabot-client run --server 192.168.68.58")
+			return
+		}
+		fmt.Fprintf(os.Stderr, "failed to read %s: %v\n", path, err)
 		os.Exit(1)
 	}
+
 	fmt.Printf("path:        %s\n", path)
 	fmt.Printf("server:      %s\n", cfg.Server)
 	fmt.Printf("port:        %d\n", cfg.Port)

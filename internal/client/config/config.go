@@ -7,23 +7,17 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 type Config struct {
-	Server   string `json:"server"`
-	Port     int    `json:"port"`
-	HTTPPort int    `json:"http_port"`
-	NoSync   bool   `json:"no_sync"`
-	Quiet    bool   `json:"quiet"`
-
-	// BootListen is the address the client's boot agent binds to. The
-	// server calls this to trigger a GRUB entry change. Default ":9753".
+	Server     string `json:"server"`
+	Port       int    `json:"port"`
+	HTTPPort   int    `json:"http_port"`
+	NoSync     bool   `json:"no_sync"`
+	Quiet      bool   `json:"quiet"`
 	BootListen string `json:"boot_listen,omitempty"`
-
-	// BootToken is a shared secret between server and client. The client
-	// generates one on install if empty; the server stores whatever the
-	// client reports. Leave empty to disable auth (LAN-only setups).
-	BootToken string `json:"boot_token,omitempty"`
+	BootToken  string `json:"boot_token,omitempty"`
 }
 
 const SystemConfigPath = "/etc/novabot/client.json"
@@ -32,6 +26,16 @@ func UserConfigPath() string {
 	if p := os.Getenv("NOVABOT_CLIENT_CONFIG"); p != "" {
 		return p
 	}
+
+	// Windows: use %AppData%\novabot\client.json — the idiomatic
+	// location. Fall back to the Linux-style path if AppData isn't
+	// set for some reason.
+	if runtime.GOOS == "windows" {
+		if appData := os.Getenv("AppData"); appData != "" {
+			return filepath.Join(appData, "novabot", "client.json")
+		}
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "novabot-client.json"
@@ -47,8 +51,11 @@ func ResolvePath(override string) string {
 	if override != "" {
 		return override
 	}
-	if _, err := os.Stat(SystemConfigPath); err == nil {
-		return SystemConfigPath
+	// System config is Linux-only; ignore it on Windows.
+	if runtime.GOOS != "windows" {
+		if _, err := os.Stat(SystemConfigPath); err == nil {
+			return SystemConfigPath
+		}
 	}
 	return UserConfigPath()
 }
