@@ -213,15 +213,12 @@ func cmdRun(args []string) {
 	log.Printf("[CLIENT] all workers exited")
 }
 
-// startupSequence waits for network, registers, then polls the server
-// for a pending boot until one is found or the deadline expires.
 func startupSequence(ctx context.Context, cfg *clientcfg.Config) {
 	log.Printf("[STARTUP] === begin ===")
 
 	var mac, ip string
 	for attempt := 1; attempt <= 60; attempt++ {
 		if ctx.Err() != nil {
-			log.Printf("[STARTUP] cancelled during network wait")
 			return
 		}
 		ip = register.LocalIP()
@@ -231,8 +228,7 @@ func startupSequence(ctx context.Context, cfg *clientcfg.Config) {
 			break
 		}
 		if attempt == 1 || attempt%5 == 0 {
-			log.Printf("[STARTUP] waiting for network (attempt %d/60) ip=%q mac=%q",
-				attempt, ip, mac)
+			log.Printf("[STARTUP] waiting for network (attempt %d/60)", attempt)
 		}
 		select {
 		case <-ctx.Done():
@@ -241,14 +237,13 @@ func startupSequence(ctx context.Context, cfg *clientcfg.Config) {
 		}
 	}
 	if ip == "" || mac == "" {
-		log.Printf("[STARTUP] network never came up — aborting startup sequence")
+		log.Printf("[STARTUP] network never came up — aborting")
 		return
 	}
 
 	log.Printf("[STARTUP] === register ===")
 	if err := registerWithRetry(ctx, cfg, mac, ip); err != nil {
 		log.Printf("[STARTUP] registration failed: %v", err)
-		// Continue anyway — checkin might still work.
 	}
 
 	log.Printf("[STARTUP] === checkin loop ===")
@@ -295,13 +290,6 @@ func registerWithRetry(ctx context.Context, cfg *clientcfg.Config, mac, ip strin
 	return lastErr
 }
 
-// checkinLoop polls the server every second until we get either a
-// pending boot to act on, or a clear "nothing to do" response.
-//
-// Stops early on: set-and-reboot (we act then return), or action=none
-// without reason=unknown-device (nothing to do). Keeps retrying on
-// network errors and on unknown-device (registration may not have
-// landed yet).
 func checkinLoop(ctx context.Context, cfg *clientcfg.Config, mac string) {
 	deadline := time.Now().Add(120 * time.Second)
 	attempt := 0
@@ -309,14 +297,12 @@ func checkinLoop(ctx context.Context, cfg *clientcfg.Config, mac string) {
 
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
-			log.Printf("[CHECKIN] cancelled")
 			return
 		}
 		attempt++
 		reply, err := doCheckin(ctx, cfg, mac)
 		if err != nil {
 			consecutiveErr++
-			// Log first, then every 10th, to avoid spam.
 			if consecutiveErr == 1 || consecutiveErr%10 == 0 {
 				log.Printf("[CHECKIN] attempt %d error (%d consecutive): %v",
 					attempt, consecutiveErr, err)
@@ -338,9 +324,6 @@ func checkinLoop(ctx context.Context, cfg *clientcfg.Config, mac string) {
 			log.Printf("[CHECKIN] got pending boot: %s/%s — acting", reply.Source, reply.ID)
 			if err := actOnPending(ctx, reply); err != nil {
 				log.Printf("[CHECKIN] act failed: %v", err)
-				// Keep retrying in case the server still has it (it
-				// only clears after a successful response, so if
-				// SetEntry failed we can retry).
 				select {
 				case <-ctx.Done():
 					return
@@ -360,7 +343,7 @@ func checkinLoop(ctx context.Context, cfg *clientcfg.Config, mac string) {
 				}
 				continue
 			}
-			log.Printf("[CHECKIN] nothing to do (%q) — stopping", reply.Reason)
+			log.Printf("[CHECKIN] nothing to do — stopping")
 			return
 
 		default:
@@ -368,7 +351,7 @@ func checkinLoop(ctx context.Context, cfg *clientcfg.Config, mac string) {
 			return
 		}
 	}
-	log.Printf("[CHECKIN] loop timed out after 120s")
+	log.Printf("[CHECKIN] loop timed out")
 }
 
 type checkinReply struct {
@@ -453,6 +436,10 @@ func alreadyBooted(id, source string) bool {
 	return false
 }
 
+// runStream keeps retrying until it can start capturing. This lets
+// the process survive the boot-time window where the audio stack
+// hasn't published a real sink yet — the boot agent stays up while we
+// wait.
 func runStream(ctx context.Context, cfg *clientcfg.Config) error {
 	log.Printf("[CLIENT] streamer starting → %s:%d", cfg.Server, cfg.Port)
 
@@ -474,6 +461,36 @@ func runStream(ctx context.Context, cfg *clientcfg.Config) error {
 		}
 	}
 
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		started := make(chan struct{})
+		err := streamOnce(ctx, cfg, qualityCh, started)
+		if ctx.Err() != nil {
+			return nil
+		}
+		select {
+		case <-started:
+			// streamOnce ran until shutdown; that's a clean exit.
+			return nil
+		default:
+		}
+
+		log.Printf("[CLIENT] streamer failed to start: %v — retrying in 10s", err)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(10 * time.Second):
+		}
+	}
+}
+
+// streamOnce is a single attempt at setting up capture + streaming.
+// It closes `started` once capture is running, so the outer loop knows
+// not to retry after a clean shutdown.
+func streamOnce(ctx context.Context, cfg *clientcfg.Config, qualityCh <-chan string, started chan<- struct{}) error {
 	streamer, err := client.NewStreamer(cfg.Server, cfg.Port)
 	if err != nil {
 		return fmt.Errorf("streamer: %w", err)
@@ -490,19 +507,28 @@ func runStream(ctx context.Context, cfg *clientcfg.Config) error {
 	if err := capture.Start(streamer.Send); err != nil {
 		return fmt.Errorf("start capture: %w", err)
 	}
+	close(started)
 
 	if qualityCh != nil {
 		go func() {
-			for name := range qualityCh {
-				if name == audio.ActiveQuality().Name {
-					continue
-				}
-				log.Printf("[CLIENT] quality → %q", name)
-				if err := audio.SetActiveQuality(name); err != nil {
-					continue
-				}
-				if err := capture.Restart(streamer.Send); err != nil {
-					log.Printf("[CLIENT] restart: %v", err)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case name, ok := <-qualityCh:
+					if !ok {
+						return
+					}
+					if name == audio.ActiveQuality().Name {
+						continue
+					}
+					log.Printf("[CLIENT] quality → %q", name)
+					if err := audio.SetActiveQuality(name); err != nil {
+						continue
+					}
+					if err := capture.Restart(streamer.Send); err != nil {
+						log.Printf("[CLIENT] restart: %v", err)
+					}
 				}
 			}
 		}()

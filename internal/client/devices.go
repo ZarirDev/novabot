@@ -2,23 +2,19 @@ package client
 
 import (
 	"fmt"
+	"log"
 	"runtime"
 	"strings"
 
 	"github.com/gen2brain/malgo"
 )
 
-// DeviceInfo describes the capture source we've selected.
 type DeviceInfo struct {
 	Name     string
 	IsLoop   bool
 	DeviceID malgo.DeviceID
 }
 
-// ResolveCaptureDevice picks the right source for the current OS.
-//
-// Windows: default output device, opened in loopback mode.
-// Linux:   the default sink's monitor source (name ends in ".monitor").
 func ResolveCaptureDevice(ctx *malgo.AllocatedContext) (DeviceInfo, error) {
 	switch runtime.GOOS {
 	case "windows":
@@ -38,40 +34,96 @@ func resolveWindows(_ *malgo.AllocatedContext) (DeviceInfo, error) {
 	}, nil
 }
 
+// resolveLinux picks a monitor of a real output sink. Dummy/null
+// sinks are skipped because they produce silence — streaming them is
+// useless. When nothing real is available yet (audio stack still
+// coming up at boot), returns an error so the caller can retry.
 func resolveLinux(ctx *malgo.AllocatedContext) (DeviceInfo, error) {
 	devices, err := ctx.Devices(malgo.Capture)
 	if err != nil {
 		return DeviceInfo{}, fmt.Errorf("enumerate capture devices: %w", err)
 	}
 
-	// Prefer the monitor of the default sink. PulseAudio names them
-	// "<sink-name>.monitor"; PipeWire follows the same convention via
-	// its pulse compatibility layer.
-	var candidates []malgo.DeviceInfo
+	log.Printf("[CLIENT] malgo sees %d capture device(s):", len(devices))
 	for _, d := range devices {
+		tags := ""
+		if d.IsDefault != 0 {
+			tags += " [default]"
+		}
+		if isDummyName(d.Name()) {
+			tags += " [dummy]"
+		}
+		log.Printf("[CLIENT]   %q%s", d.Name(), tags)
+	}
+
+	var monitors []malgo.DeviceInfo
+	var others []malgo.DeviceInfo
+	skippedDummy := 0
+	for _, d := range devices {
+		if isDummyName(d.Name()) {
+			skippedDummy++
+			continue
+		}
 		if strings.Contains(strings.ToLower(d.Name()), "monitor") {
-			candidates = append(candidates, d)
+			monitors = append(monitors, d)
+		} else {
+			others = append(others, d)
 		}
 	}
 
-	if len(candidates) == 0 {
-		return DeviceInfo{}, fmt.Errorf(
-			"no monitor source found; is PulseAudio/PipeWire running and is your user in the 'audio' group?",
-		)
+	pick := func(list []malgo.DeviceInfo) (malgo.DeviceInfo, bool) {
+		if len(list) == 0 {
+			return malgo.DeviceInfo{}, false
+		}
+		chosen := list[0]
+		for _, d := range list {
+			if d.IsDefault != 0 {
+				chosen = d
+				break
+			}
+		}
+		return chosen, true
 	}
 
-	// If one is marked default, use it; otherwise take the first.
-	chosen := candidates[0]
-	for _, d := range candidates {
-		if d.IsDefault != 0 { // malgo's IsDefault is an int (miniaudio ma_bool32)
-			chosen = d
-			break
+	if chosen, ok := pick(monitors); ok {
+		log.Printf("[CLIENT] using real monitor: %q", chosen.Name())
+		return DeviceInfo{
+			Name:     chosen.Name(),
+			IsLoop:   false,
+			DeviceID: chosen.ID,
+		}, nil
+	}
+	if chosen, ok := pick(others); ok {
+		log.Printf("[CLIENT] no monitor found; falling back to: %q", chosen.Name())
+		return DeviceInfo{
+			Name:     chosen.Name(),
+			IsLoop:   false,
+			DeviceID: chosen.ID,
+		}, nil
+	}
+
+	return DeviceInfo{}, fmt.Errorf(
+		"no usable capture device (%d dummy device(s) skipped). "+
+			"connect a real audio output on this machine, or check that "+
+			"PulseAudio/PipeWire is running with a non-null default sink",
+		skippedDummy)
+}
+
+// isDummyName matches the names ALSA/PulseAudio/PipeWire give to
+// placeholder null sinks. These produce silence at full rate, so any
+// capture from them yields empty audio.
+func isDummyName(name string) bool {
+	n := strings.ToLower(name)
+	for _, s := range []string{
+		"dummy",
+		"null",
+		"auto_null",
+		"auto-null",
+		"auto_null.monitor",
+	} {
+		if strings.Contains(n, s) {
+			return true
 		}
 	}
-
-	return DeviceInfo{
-		Name:     chosen.Name(),
-		IsLoop:   false,
-		DeviceID: chosen.ID, // struct field, not a method
-	}, nil
+	return false
 }
